@@ -82,6 +82,7 @@ struct __attribute__((packed)) ShowEvent {
     uint8_t  effectType;
     uint8_t  _pad[3];
     uint32_t color;
+    uint32_t color2;
     uint32_t targetMask[MASK_ARRAY_SIZE];
 };
 
@@ -133,6 +134,7 @@ uint8_t currentEffectType = CMD_OFF;
 uint32_t currentEffectStart = 0;
 uint32_t currentEffectDuration = 0;
 uint32_t currentEffectColor = 0;
+uint32_t currentEffectColor2 = 0;
 
 // Frame management
 bool frameDirty = false;
@@ -544,6 +546,7 @@ void checkSchedule() {
                 currentEffectStart = e->startTime;
                 currentEffectDuration = e->duration;
                 currentEffectColor = e->color;
+                currentEffectColor2 = e->color2;
                 eventFound = true;
                 lastActiveAnimationTime = millis();
                 break;
@@ -702,30 +705,35 @@ void renderFire(uint32_t localTime) {
     markDirty();
 }
 
-void renderEnergy(uint32_t localTime, uint32_t color) {
+void renderEnergy(uint32_t localTime, uint32_t color, uint32_t color2) {
     float t = (float)localTime / 500.0f;
+    uint8_t r1 = (color >> 16) & 0xFF, g1 = (color >> 8) & 0xFF, b1 = color & 0xFF;
+    uint8_t r2 = (color2 >> 16) & 0xFF, g2 = (color2 >> 8) & 0xFF, b2 = color2 & 0xFF;
     for (int i = 0; i < strip.numPixels(); i++) {
         float w1 = sin(i * 0.2 + t);
         float w2 = sin(i * 0.3 - t * 1.5);
         float val = (w1 + w2 + 2.0f) / 4.0f;
-        strip.setPixelColor(i, dimColor(color, val));
+        uint8_t r = r1 + (r2 - r1) * val;
+        uint8_t g = g1 + (g2 - g1) * val;
+        uint8_t b = b1 + (b2 - b1) * val;
+        strip.setPixelColor(i, strip.Color(r, g, b));
     }
     markDirty();
 }
 
-void renderGlitch(uint32_t localTime, uint32_t color) {
+void renderGlitch(uint32_t localTime, uint32_t color, uint32_t color2) {
     srand(localTime / 50);
     if (rand() % 10 > 7) {
-        strip.clear();
+        strip.fill(color2);
     } else {
         strip.fill(color);
     }
     markDirty();
 }
 
-void renderAlternate(uint32_t color) {
+void renderAlternate(uint32_t color, uint32_t color2) {
     for (int i = 0; i < strip.numPixels(); i++) {
-        strip.setPixelColor(i, (i % 2 == 0) ? color : 0);
+        strip.setPixelColor(i, (i % 2 == 0) ? color : color2);
     }
     markDirty();
 }
@@ -736,6 +744,10 @@ void renderFrame() {
     uint8_t g = (uint8_t)((currentEffectColor >> 8) & 0xFF);
     uint8_t b = (uint8_t)(currentEffectColor & 0xFF);
     uint32_t c = strip.Color(r, g, b);
+    uint8_t r2 = (uint8_t)((currentEffectColor2 >> 16) & 0xFF);
+    uint8_t g2 = (uint8_t)((currentEffectColor2 >> 8) & 0xFF);
+    uint8_t b2 = (uint8_t)(currentEffectColor2 & 0xFF);
+    uint32_t c2 = strip.Color(r2, g2, b2);
     switch (currentEffectType) {
         case CMD_OFF:
             if (!stripIsOff) {
@@ -783,13 +795,13 @@ void renderFrame() {
             renderFire(localTime);
             break;
         case CMD_ENERGY:
-            renderEnergy(localTime, c);
+            renderEnergy(localTime, c, c2);
             break;
         case CMD_GLITCH:
-            renderGlitch(localTime, c);
+            renderGlitch(localTime, c, c2);
             break;
         case CMD_ALTERNATE:
-            renderAlternate(c);
+            renderAlternate(c, c2);
             break;
         default:
             if (!stripIsOff) {
