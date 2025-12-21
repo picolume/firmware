@@ -816,7 +816,7 @@ void renderFrame() {
 void setup() {
     Serial.begin(115200);
     delay(100);
-    Serial.println(F("PicoLume Receiver v16.0"));
+    Serial.println(F("PicoLume Receiver v0.1.0"));
     Serial.println(F("USB Mass Storage + Version 2 Binary Support"));
 
     EEPROM.begin(256);
