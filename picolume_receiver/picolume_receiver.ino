@@ -1,10 +1,11 @@
 /**
  * @file picolume_receiver.ino
  * @brief PicoLume Receiver
- * @version 0.1.0
- * - Added support for Binary Format Version 2 (Heterogeneous Hardware)
- * - Added Look-Up Table (LUT) for per-prop LED counts
- * - Strip length is now set dynamically based on Prop ID
+ * @version 0.2.0
+ *
+ * Binary Format V3 (PropConfig LUT):
+ * - Per-prop LED count, type, color order, and brightness cap
+ * - 8 bytes per prop × 224 props = 1792 byte LUT
  */
 
 #include <SPI.h>
@@ -67,6 +68,26 @@ enum EffectType {
     CMD_ALTERNATE = 18
 };
 
+// ====================== LED HARDWARE TYPES ===================
+// These must match the Studio's LED_TYPES enum
+enum LedType {
+    LED_WS2812B = 0,      // Most common addressable LED
+    LED_SK6812 = 1,       // Similar timing to WS2812B
+    LED_SK6812_RGBW = 2,  // 4-channel RGBW
+    LED_APA102 = 3        // SPI-based (not yet supported)
+};
+
+// Color channel ordering - must match Studio's COLOR_ORDERS enum
+// All 6 permutations of RGB supported by NeoPixel library
+enum ColorOrder {
+    COLOR_GRB = 0,   // WS2812B default (NEO_GRB)
+    COLOR_RGB = 1,   // NEO_RGB
+    COLOR_BRG = 2,   // NEO_BRG
+    COLOR_RBG = 3,   // NEO_RBG
+    COLOR_GBR = 4,   // NEO_GBR
+    COLOR_BGR = 5    // NEO_BGR
+};
+
 // ====================== DATA STRUCTURES ======================
 struct RadioPacket {
     uint32_t packetCounter;
@@ -91,9 +112,18 @@ struct __attribute__((packed)) ShowHeader {
     uint16_t version;
     uint16_t eventCount;
     uint16_t ledCount;    // Global default (Legacy/Fallback)
-    uint8_t  brightness;
+    uint8_t  brightness;  // Global brightness (fallback for V1/V2)
     uint8_t  _reserved1;
     uint8_t  reserved[4];
+};
+
+// PropConfig - V3 per-prop configuration (8 bytes each, 224 entries = 1792 bytes)
+struct __attribute__((packed)) PropConfig {
+    uint16_t ledCount;      // Number of LEDs for this prop
+    uint8_t  ledType;       // LedType enum value
+    uint8_t  colorOrder;    // ColorOrder enum value
+    uint8_t  brightnessCap; // Max brightness (0-255) for this prop
+    uint8_t  reserved[3];   // Future use
 };
 
 // ====================== HARDWARE OBJECTS =====================
@@ -103,7 +133,14 @@ RH_RF69 driver(RF69_CS_PIN, RF69_INT_PIN);
 
 // ====================== SHOW DATA ============================
 ShowEvent showSchedule[MAX_EVENTS];
-uint16_t propLengths[TOTAL_PROPS]; // <-- NEW: Look-Up Table
+// This prop's hardware configuration (from V3 LUT, or defaults for V1/V2)
+PropConfig myConfig = {
+    DEFAULT_NUM_LEDS,     // ledCount
+    LED_WS2812B,          // ledType
+    COLOR_GRB,            // colorOrder
+    DEFAULT_BRIGHTNESS,   // brightnessCap
+    {0, 0, 0}             // reserved
+};
 int showLength = 0;
 uint16_t numLeds = DEFAULT_NUM_LEDS;
 uint8_t maxBrightness = DEFAULT_BRIGHTNESS;
@@ -215,41 +252,38 @@ bool loadShowFromFlash() {
         return false;
     }
 
-    // --- VERSION HANDLING ---
-    if (header.version == 1) {
-        // V1: Homogeneous - Global LED count applies to everyone
-        Serial.println(F("Format: V1 (Global)"));
-        numLeds = header.ledCount;
-        // Fill LUT with global default for safety
-        for (int i = 0; i < TOTAL_PROPS; i++) {
-            propLengths[i] = numLeds;
-        }
-    } else if (header.version == 2) {
-        // V2: Heterogeneous - Read Look-Up Table
-        Serial.println(F("Format: V2 (Per-Prop)"));
-
-        // Read alignment byte (1 byte padding after header)
-        uint8_t padding;
-        f.read(&padding, 1);
-
-        // Read LUT (224 * 2 bytes = 448 bytes)
-        if (f.read((uint8_t*)propLengths, sizeof(propLengths)) != sizeof(propLengths)) {
-            Serial.println(F("Failed to read LUT"));
-            f.close();
-            return false;
-        }
-
-        // Set MY specific LED count based on stored propID
-        // propID is 1-based, array is 0-based
-        numLeds = propLengths[propID - 1];
-    } else {
-        Serial.print(F("Unknown version: "));
-        Serial.println(header.version);
+    // --- VERSION HANDLING (V3 only) ---
+    if (header.version != 3) {
+        Serial.print(F("Unsupported version: "));
+        Serial.print(header.version);
+        Serial.println(F(" (requires V3)"));
         f.close();
         return false;
     }
 
-    maxBrightness = header.brightness;
+    // V3: PropConfig LUT (8 bytes per prop = 1792 bytes total)
+    maxBrightness = header.brightness;  // Global fallback
+
+    // Seek to our prop's PropConfig entry (propID is 1-based)
+    f.seek(sizeof(ShowHeader) + (propID - 1) * sizeof(PropConfig));
+    if (f.read((uint8_t*)&myConfig, sizeof(PropConfig)) != sizeof(PropConfig)) {
+        Serial.println(F("Failed to read PropConfig"));
+        f.close();
+        return false;
+    }
+    numLeds = myConfig.ledCount;
+
+    // Seek past entire LUT to events section
+    f.seek(sizeof(ShowHeader) + TOTAL_PROPS * sizeof(PropConfig));
+
+    Serial.print(F("Config: LEDs="));
+    Serial.print(numLeds);
+    Serial.print(F(" Type="));
+    Serial.print(myConfig.ledType);
+    Serial.print(F(" Order="));
+    Serial.print(myConfig.colorOrder);
+    Serial.print(F(" Cap="));
+    Serial.println(myConfig.brightnessCap);
     showLength = min((int)header.eventCount, MAX_EVENTS);
 
     Serial.print(F("ID "));
@@ -816,8 +850,7 @@ void renderFrame() {
 void setup() {
     Serial.begin(115200);
     delay(100);
-    Serial.println(F("PicoLume Receiver v0.1.0"));
-    Serial.println(F("USB Mass Storage + Version 2 Binary Support"));
+    Serial.println(F("PicoLume Receiver v0.2.0 (V3 format)"));
 
     EEPROM.begin(256);
 
@@ -878,10 +911,16 @@ void setup() {
 
     // CRITICAL: Update strip length based on what we loaded!
     strip.updateLength(numLeds);
-    strip.setBrightness(maxBrightness);
+    // Apply per-prop brightness cap (from myConfig, populated by V1/V2/V3 loader)
+    strip.setBrightness(myConfig.brightnessCap);
     strip.clear();
     markAllOff();
     showIfDirty();
+
+    Serial.print(F("Strip configured: "));
+    Serial.print(numLeds);
+    Serial.print(F(" LEDs @ brightness "));
+    Serial.println(myConfig.brightnessCap);
 
     attachInterrupt(digitalPinToInterrupt(CONFIG_BUTTON_PIN), button_isr, FALLING);
 
