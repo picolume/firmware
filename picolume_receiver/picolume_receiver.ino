@@ -19,9 +19,27 @@
 #include <FatFSUSB.h>
 #include "hardware/watchdog.h"
 
+// Forward declarations (required for Arduino's auto-prototype generator)
+struct ShowHeader;
+struct PropConfig;
+
+// ====================== DEBUG CONFIG =========================
+// Set to 1 for verbose serial output, 0 for production (faster boot)
+#define DEBUG_MODE 0
+
+#if DEBUG_MODE
+#define DEBUG_PRINT(x) Serial.print(x)
+#define DEBUG_PRINTLN(x) Serial.println(x)
+#define DEBUG_PRINTHEX(x) Serial.print(x, HEX)
+#else
+#define DEBUG_PRINT(x)
+#define DEBUG_PRINTLN(x)
+#define DEBUG_PRINTHEX(x)
+#endif
+
 // ====================== HARDWARE CONFIG ======================
-#define LED_PIN 14
-#define CONFIG_BUTTON_PIN 22
+#define LED_PIN 22
+#define CONFIG_BUTTON_PIN 28
 #define OLED_SDA_PIN 10
 #define OLED_SCL_PIN 11
 
@@ -45,10 +63,11 @@
 // ====================== TIMING CONSTANTS =====================
 #define LONG_PRESS_MS 3000
 #define PACKET_TIMEOUT_MS 3000
-#define STRIP_TIMEOUT_MS 1800000UL  // 30 minutes
+#define STRIP_TIMEOUT_MS 1800000UL // 30 minutes
 
 // ====================== EFFECT TYPES =========================
-enum EffectType {
+enum EffectType
+{
     CMD_OFF = 0,
     CMD_SOLID_COLOR = 1,
     CMD_CAMERA_FLASH = 2,
@@ -70,61 +89,225 @@ enum EffectType {
 
 // ====================== LED HARDWARE TYPES ===================
 // These must match the Studio's LED_TYPES enum
-enum LedType {
-    LED_WS2812B = 0,      // Most common addressable LED
-    LED_SK6812 = 1,       // Similar timing to WS2812B
-    LED_SK6812_RGBW = 2,  // 4-channel RGBW
-    LED_APA102 = 3        // SPI-based (not yet supported)
+enum LedType
+{
+    LED_WS2812B = 0,     // Most common addressable LED (800 KHz)
+    LED_SK6812 = 1,      // Similar timing to WS2812B (800 KHz)
+    LED_SK6812_RGBW = 2, // 4-channel RGBW (800 KHz)
+    LED_WS2811 = 3,      // 400 KHz, often 12V, 3 LEDs per IC
+    LED_WS2813 = 4,      // 800 KHz, backup data line
+    LED_WS2815 = 5       // 12V version of WS2813, backup data line
 };
 
 // Color channel ordering - must match Studio's COLOR_ORDERS enum
 // All 6 permutations of RGB supported by NeoPixel library
-enum ColorOrder {
-    COLOR_GRB = 0,   // WS2812B default (NEO_GRB)
-    COLOR_RGB = 1,   // NEO_RGB
-    COLOR_BRG = 2,   // NEO_BRG
-    COLOR_RBG = 3,   // NEO_RBG
-    COLOR_GBR = 4,   // NEO_GBR
-    COLOR_BGR = 5    // NEO_BGR
+enum ColorOrder
+{
+    COLOR_GRB = 0, // WS2812B default (NEO_GRB)
+    COLOR_RGB = 1, // NEO_RGB
+    COLOR_BRG = 2, // NEO_BRG
+    COLOR_RBG = 3, // NEO_RBG
+    COLOR_GBR = 4, // NEO_GBR
+    COLOR_BGR = 5  // NEO_BGR
 };
+
+// ====================== NEOPIXEL TYPE HELPER =================
+// Convert LedType + ColorOrder enums to NeoPixel library flags
+uint16_t getNeoPixelType(uint8_t ledType, uint8_t colorOrder)
+{
+    uint16_t colorFlags;
+    uint16_t freqFlags = NEO_KHZ800; // Default for most LED types
+
+    // WS2811 uses 400 KHz timing
+    if (ledType == LED_WS2811)
+    {
+        freqFlags = NEO_KHZ400;
+    }
+
+    // Handle RGBW types (SK6812 RGBW) - 4 bytes per pixel
+    if (ledType == LED_SK6812_RGBW)
+    {
+        switch (colorOrder)
+        {
+        case COLOR_GRB:
+            colorFlags = NEO_GRBW;
+            break;
+        case COLOR_RGB:
+            colorFlags = NEO_RGBW;
+            break;
+        case COLOR_BRG:
+            colorFlags = NEO_BRGW;
+            break;
+        case COLOR_RBG:
+            colorFlags = NEO_RBGW;
+            break;
+        case COLOR_GBR:
+            colorFlags = NEO_GBRW;
+            break;
+        case COLOR_BGR:
+            colorFlags = NEO_BGRW;
+            break;
+        default:
+            colorFlags = NEO_GRBW;
+            break;
+        }
+    }
+    else
+    {
+        // Standard RGB types (3 bytes per pixel)
+        switch (colorOrder)
+        {
+        case COLOR_GRB:
+            colorFlags = NEO_GRB;
+            break;
+        case COLOR_RGB:
+            colorFlags = NEO_RGB;
+            break;
+        case COLOR_BRG:
+            colorFlags = NEO_BRG;
+            break;
+        case COLOR_RBG:
+            colorFlags = NEO_RBG;
+            break;
+        case COLOR_GBR:
+            colorFlags = NEO_GBR;
+            break;
+        case COLOR_BGR:
+            colorFlags = NEO_BGR;
+            break;
+        default:
+            colorFlags = NEO_GRB;
+            break;
+        }
+    }
+
+    return colorFlags + freqFlags;
+}
 
 // ====================== DATA STRUCTURES ======================
-struct RadioPacket {
+struct RadioPacket
+{
     uint32_t packetCounter;
     uint32_t masterTime;
-    uint8_t  state;
-    uint8_t  hopCount;
-    uint8_t  sourceID;
+    uint8_t state;
+    uint8_t hopCount;
+    uint8_t sourceID;
 };
 
-struct __attribute__((packed)) ShowEvent {
+struct __attribute__((packed)) ShowEvent
+{
     uint32_t startTime;
     uint32_t duration;
-    uint8_t  effectType;
-    uint8_t  _pad[3];
+    uint8_t effectType;
+    uint8_t _pad[3];
     uint32_t color;
     uint32_t color2;
     uint32_t targetMask[MASK_ARRAY_SIZE];
 };
 
-struct __attribute__((packed)) ShowHeader {
+struct __attribute__((packed)) ShowHeader
+{
     uint32_t magic;
     uint16_t version;
     uint16_t eventCount;
-    uint16_t ledCount;    // Global default (Legacy/Fallback)
-    uint8_t  brightness;  // Global brightness (fallback for V1/V2)
-    uint8_t  _reserved1;
-    uint8_t  reserved[4];
+    uint16_t ledCount;  // Global default (Legacy/Fallback)
+    uint8_t brightness; // Global brightness (fallback for V1/V2)
+    uint8_t _reserved1;
+    uint8_t reserved[4];
 };
 
 // PropConfig - V3 per-prop configuration (8 bytes each, 224 entries = 1792 bytes)
-struct __attribute__((packed)) PropConfig {
-    uint16_t ledCount;      // Number of LEDs for this prop
-    uint8_t  ledType;       // LedType enum value
-    uint8_t  colorOrder;    // ColorOrder enum value
-    uint8_t  brightnessCap; // Max brightness (0-255) for this prop
-    uint8_t  reserved[3];   // Future use
+struct __attribute__((packed)) PropConfig
+{
+    uint16_t ledCount;     // Number of LEDs for this prop
+    uint8_t ledType;       // LedType enum value
+    uint8_t colorOrder;    // ColorOrder enum value
+    uint8_t brightnessCap; // Max brightness (0-255) for this prop
+    uint8_t reserved[3];   // Future use
 };
+
+// ====================== DEBUG HELPERS =========================
+static const __FlashStringHelper *ledTypeName(uint8_t ledType)
+{
+    switch (ledType)
+    {
+    case LED_WS2812B:
+        return F("WS2812B");
+    case LED_SK6812:
+        return F("SK6812");
+    case LED_SK6812_RGBW:
+        return F("SK6812_RGBW");
+    case LED_WS2811:
+        return F("WS2811");
+    case LED_WS2813:
+        return F("WS2813");
+    case LED_WS2815:
+        return F("WS2815");
+    default:
+        return F("UNKNOWN");
+    }
+}
+
+static const __FlashStringHelper *colorOrderName(uint8_t order)
+{
+    switch (order)
+    {
+    case COLOR_GRB:
+        return F("GRB");
+    case COLOR_RGB:
+        return F("RGB");
+    case COLOR_BRG:
+        return F("BRG");
+    case COLOR_RBG:
+        return F("RBG");
+    case COLOR_GBR:
+        return F("GBR");
+    case COLOR_BGR:
+        return F("BGR");
+    default:
+        return F("UNKNOWN");
+    }
+}
+
+static void printShowConfig(const ShowHeader &header, uint8_t id, const PropConfig &cfg)
+{
+    Serial.println();
+    Serial.println(F("=== PicoLume show.bin parsed settings ==="));
+    Serial.print(F("Header: magic=0x"));
+    Serial.print(header.magic, HEX);
+    Serial.print(F(" version="));
+    Serial.print(header.version);
+    Serial.print(F(" events="));
+    Serial.print(header.eventCount);
+    Serial.print(F(" legacyLedCount="));
+    Serial.print(header.ledCount);
+    Serial.print(F(" legacyBrightness="));
+    Serial.println(header.brightness);
+
+    Serial.print(F("Prop ID: "));
+    Serial.println(id);
+
+    Serial.print(F("PropConfig: ledCount="));
+    Serial.print(cfg.ledCount);
+    Serial.print(F(" ledType="));
+    Serial.print(cfg.ledType);
+    Serial.print(F(" ("));
+    Serial.print(ledTypeName(cfg.ledType));
+    Serial.print(F(") colorOrder="));
+    Serial.print(cfg.colorOrder);
+    Serial.print(F(" ("));
+    Serial.print(colorOrderName(cfg.colorOrder));
+    Serial.print(F(") brightnessCap="));
+    Serial.println(cfg.brightnessCap);
+
+    const bool rgbw = (cfg.ledType == LED_SK6812_RGBW);
+    Serial.print(F("Derived: rgbw="));
+    Serial.print(rgbw ? F("true") : F("false"));
+    Serial.print(F(" neoPixelType=0x"));
+    Serial.println(getNeoPixelType(cfg.ledType, cfg.colorOrder), HEX);
+    Serial.println(F("========================================="));
+    Serial.println();
+}
 
 // ====================== HARDWARE OBJECTS =====================
 Adafruit_NeoPixel strip(DEFAULT_NUM_LEDS, LED_PIN, NEO_RGB + NEO_KHZ800);
@@ -135,13 +318,14 @@ RH_RF69 driver(RF69_CS_PIN, RF69_INT_PIN);
 ShowEvent showSchedule[MAX_EVENTS];
 // This prop's hardware configuration (from V3 LUT, or defaults for V1/V2)
 PropConfig myConfig = {
-    DEFAULT_NUM_LEDS,     // ledCount
-    LED_WS2812B,          // ledType
-    COLOR_GRB,            // colorOrder
-    DEFAULT_BRIGHTNESS,   // brightnessCap
-    {0, 0, 0}             // reserved
+    DEFAULT_NUM_LEDS,   // ledCount
+    LED_WS2812B,        // ledType
+    COLOR_GRB,          // colorOrder
+    DEFAULT_BRIGHTNESS, // brightnessCap
+    {0, 0, 0}           // reserved
 };
 int showLength = 0;
+uint32_t showEndTime = 0; // Calculated end time of last event
 uint16_t numLeds = DEFAULT_NUM_LEDS;
 uint8_t maxBrightness = DEFAULT_BRIGHTNESS;
 
@@ -150,6 +334,7 @@ uint8_t propID = 1;
 uint32_t currentShowTime = 0;
 bool isShowPlaying = false;
 bool radioInitialized = false;
+bool isRGBW = false; // Set true for SK6812_RGBW strips
 
 // Mode flags
 bool inTestMode = false;
@@ -176,10 +361,26 @@ uint32_t currentEffectColor2 = 0;
 // Frame management
 bool frameDirty = false;
 bool stripIsOff = true;
+bool showEndReported = false; // One-shot flag for show end message
 
-static inline void markDirty()   { frameDirty = true; stripIsOff = false; }
-static inline void markAllOff()  { stripIsOff = true; frameDirty = true; }
-static inline void showIfDirty() { if (frameDirty) { strip.show(); frameDirty = false; } }
+static inline void markDirty()
+{
+    frameDirty = true;
+    stripIsOff = false;
+}
+static inline void markAllOff()
+{
+    stripIsOff = true;
+    frameDirty = true;
+}
+static inline void showIfDirty()
+{
+    if (frameDirty)
+    {
+        strip.show();
+        frameDirty = false;
+    }
+}
 
 // Button state
 volatile bool buttonPressFlag = false;
@@ -193,10 +394,12 @@ volatile bool usbWasPlugged = false;
 volatile bool usbUnplugged = false;
 
 // ====================== BUTTON ISR ===========================
-void button_isr() {
+void button_isr()
+{
     static unsigned long last_interrupt_time = 0;
     unsigned long interrupt_time = millis();
-    if (interrupt_time - last_interrupt_time > 200) {
+    if (interrupt_time - last_interrupt_time > 200)
+    {
         buttonPressFlag = true;
         buttonPressTime = interrupt_time;
     }
@@ -204,27 +407,55 @@ void button_isr() {
 }
 
 // ====================== UTILITY FUNCTIONS ====================
-void savePropID(uint8_t id) {
+void savePropID(uint8_t id)
+{
     EEPROM.write(0, id);
     EEPROM.commit();
 }
 
-uint8_t loadPropID() {
+uint8_t loadPropID()
+{
     uint8_t id = EEPROM.read(0);
-    if (id < 1 || id > TOTAL_PROPS) {
+    if (id < 1 || id > TOTAL_PROPS)
+    {
         id = 1;
         savePropID(id);
     }
     return id;
 }
 
-uint32_t dimColor(uint32_t color, float brightness) {
-    if (brightness <= 0) return 0;
-    if (brightness >= 1) return color;
+uint32_t dimColor(uint32_t color, float brightness)
+{
+    if (brightness <= 0)
+        return 0;
+    if (brightness >= 1)
+        return color;
     uint8_t r = (uint8_t)((color >> 16) & 0xFF);
     uint8_t g = (uint8_t)((color >> 8) & 0xFF);
     uint8_t b = (uint8_t)(color & 0xFF);
     return strip.Color((uint8_t)(r * brightness), (uint8_t)(g * brightness), (uint8_t)(b * brightness));
+}
+
+// Convert RGB to RGBW by extracting white component
+// For RGBW strips, this makes whites appear more natural
+uint32_t makeColor(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!isRGBW)
+    {
+        return strip.Color(r, g, b);
+    }
+    // Derive white from minimum of R, G, B
+    uint8_t w = min(r, min(g, b));
+    return strip.Color(r - w, g - w, b - w, w);
+}
+
+// Overload for packed RGB color (from event data)
+uint32_t makeColorFromPacked(uint32_t rgb)
+{
+    uint8_t r = (rgb >> 16) & 0xFF;
+    uint8_t g = (rgb >> 8) & 0xFF;
+    uint8_t b = rgb & 0xFF;
+    return makeColor(r, g, b);
 }
 
 // ====================== USB CALLBACKS ========================
@@ -232,28 +463,33 @@ void plugCallback(uint32_t data) { usbWasPlugged = true; }
 void unplugCallback(uint32_t data) { usbUnplugged = true; }
 
 // ====================== SHOW FILE LOADING ====================
-bool loadShowFromFlash() {
+bool loadShowFromFlash()
+{
     File f = FatFS.open("/show.bin", "r");
-    if (!f) {
+    if (!f)
+    {
         Serial.println(F("No show.bin found"));
         return false;
     }
 
     ShowHeader header;
-    if (f.read((uint8_t*)&header, sizeof(header)) != sizeof(header)) {
+    if (f.read((uint8_t *)&header, sizeof(header)) != sizeof(header))
+    {
         Serial.println(F("Failed to read header"));
         f.close();
         return false;
     }
 
-    if (header.magic != 0x5049434F) {
+    if (header.magic != 0x5049434F)
+    {
         Serial.println(F("Invalid file magic"));
         f.close();
         return false;
     }
 
     // --- VERSION HANDLING (V3 only) ---
-    if (header.version != 3) {
+    if (header.version != 3)
+    {
         Serial.print(F("Unsupported version: "));
         Serial.print(header.version);
         Serial.println(F(" (requires V3)"));
@@ -262,16 +498,53 @@ bool loadShowFromFlash() {
     }
 
     // V3: PropConfig LUT (8 bytes per prop = 1792 bytes total)
-    maxBrightness = header.brightness;  // Global fallback
+    maxBrightness = header.brightness; // Global fallback
 
     // Seek to our prop's PropConfig entry (propID is 1-based)
-    f.seek(sizeof(ShowHeader) + (propID - 1) * sizeof(PropConfig));
-    if (f.read((uint8_t*)&myConfig, sizeof(PropConfig)) != sizeof(PropConfig)) {
-        Serial.println(F("Failed to read PropConfig"));
+    size_t propConfigOffset = sizeof(ShowHeader) + (propID - 1) * sizeof(PropConfig);
+    Serial.print(F("Seeking to PropConfig at offset: "));
+    Serial.print(propConfigOffset);
+    Serial.print(F(" (header="));
+    Serial.print(sizeof(ShowHeader));
+    Serial.print(F(" + ("));
+    Serial.print(propID);
+    Serial.print(F("-1) * "));
+    Serial.print(sizeof(PropConfig));
+    Serial.println(F(")"));
+
+    f.seek(propConfigOffset);
+
+    // Read raw bytes first for debugging
+    uint8_t rawConfig[8];
+    if (f.read(rawConfig, 8) != 8)
+    {
+        Serial.println(F("Failed to read PropConfig bytes"));
         f.close();
         return false;
     }
+
+    Serial.print(F("Raw PropConfig bytes: "));
+    for (int i = 0; i < 8; i++)
+    {
+        if (rawConfig[i] < 0x10)
+            Serial.print(F("0"));
+        Serial.print(rawConfig[i], HEX);
+        Serial.print(F(" "));
+    }
+    Serial.println();
+    Serial.print(F("  [0-1] LedCount: "));
+    Serial.println(rawConfig[0] | (rawConfig[1] << 8));
+    Serial.print(F("  [2]   LedType: "));
+    Serial.println(rawConfig[2]);
+    Serial.print(F("  [3]   ColorOrder: "));
+    Serial.println(rawConfig[3]);
+    Serial.print(F("  [4]   BrightnessCap: "));
+    Serial.println(rawConfig[4]);
+
+    // Copy to struct
+    memcpy(&myConfig, rawConfig, sizeof(PropConfig));
     numLeds = myConfig.ledCount;
+    printShowConfig(header, propID, myConfig);
 
     // Seek past entire LUT to events section
     f.seek(sizeof(ShowHeader) + TOTAL_PROPS * sizeof(PropConfig));
@@ -292,14 +565,59 @@ bool loadShowFromFlash() {
     Serial.print(numLeds);
     Serial.println(F(" LEDs"));
 
-    // Read Events
-    for (int i = 0; i < showLength; i++) {
-        if (f.read((uint8_t*)&showSchedule[i], sizeof(ShowEvent)) != sizeof(ShowEvent)) {
+    // Read Events and calculate show end time FOR THIS PROP ONLY
+    showEndTime = 0;
+    uint8_t bucketIndex = (propID - 1) / 32;
+    uint32_t bitMask = (1UL << ((propID - 1) % 32));
+    int eventsForThisProp = 0;
+
+    Serial.print(F("Prop "));
+    Serial.print(propID);
+    Serial.print(F(" -> bucket["));
+    Serial.print(bucketIndex);
+    Serial.print(F("] mask=0x"));
+    Serial.println(bitMask, HEX);
+
+    for (int i = 0; i < showLength; i++)
+    {
+        if (f.read((uint8_t *)&showSchedule[i], sizeof(ShowEvent)) != sizeof(ShowEvent))
+        {
             Serial.print(F("Failed to read event "));
             Serial.println(i);
             showLength = i;
             break;
         }
+        // Only track end time for events targeting THIS prop
+        if (showSchedule[i].targetMask[bucketIndex] & bitMask)
+        {
+            eventsForThisProp++;
+            uint32_t eventEnd = showSchedule[i].startTime + showSchedule[i].duration;
+            Serial.print(F("  Event "));
+            Serial.print(i);
+            Serial.print(F(": start="));
+            Serial.print(showSchedule[i].startTime);
+            Serial.print(F(" dur="));
+            Serial.print(showSchedule[i].duration);
+            Serial.print(F(" end="));
+            Serial.println(eventEnd);
+            if (eventEnd > showEndTime)
+            {
+                showEndTime = eventEnd;
+            }
+        }
+    }
+
+    Serial.print(F("Events targeting prop "));
+    Serial.print(propID);
+    Serial.print(F(": "));
+    Serial.println(eventsForThisProp);
+    Serial.print(F("Show end time: "));
+    Serial.print(showEndTime);
+    Serial.println(F(" ms"));
+
+    if (showEndTime == 0 && showLength > 0)
+    {
+        Serial.println(F("WARNING: No events target this prop! Check show.bin targetMask."));
     }
 
     f.close();
@@ -307,7 +625,8 @@ bool loadShowFromFlash() {
 }
 
 // ====================== USB MASS STORAGE MODE ================
-void runUSBMode() {
+void runUSBMode()
+{
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
@@ -320,7 +639,8 @@ void runUSBMode() {
     display.display();
 
     // *** FIX: Handle mount failure by formatting ***
-    if (!FatFS.begin()) {
+    if (!FatFS.begin())
+    {
         Serial.println(F("FatFS mount failed in USB mode, formatting..."));
         display.clearDisplay();
         display.setCursor(0, 0);
@@ -328,13 +648,14 @@ void runUSBMode() {
         display.setCursor(0, 12);
         display.println(F("Formatting..."));
         display.display();
-        strip.setPixelColor(0, strip.Color(255, 165, 0));  // Orange = formatting
+        strip.setPixelColor(0, strip.Color(255, 165, 0)); // Orange = formatting
         strip.show();
 
         FatFS.format();
         delay(500);
 
-        if (!FatFS.begin()) {
+        if (!FatFS.begin())
+        {
             // Still failing after format - likely hardware issue
             Serial.println(F("Format failed - hardware issue?"));
             display.clearDisplay();
@@ -345,7 +666,8 @@ void runUSBMode() {
             display.display();
 
             // Blink red forever
-            while (true) {
+            while (true)
+            {
                 strip.setPixelColor(0, strip.Color(50, 0, 0));
                 strip.show();
                 delay(500);
@@ -362,46 +684,84 @@ void runUSBMode() {
         display.setCursor(0, 12);
         display.println(F("Starting USB..."));
         display.display();
-        strip.setPixelColor(0, strip.Color(0, 50, 0));  // Green = success
+        strip.setPixelColor(0, strip.Color(0, 50, 0)); // Green = success
         strip.show();
         delay(1000);
     }
 
     FatFSUSB.onPlug(plugCallback);
     FatFSUSB.onUnplug(unplugCallback);
+
+    // Ensure Studio can reliably detect the drive on first use.
+    // Studio's uploader looks for INDEX.HTM or an existing show.bin on the mounted volume.
+    // Creating these files is non-destructive (we only create them if missing).
+    {
+        File f = FatFS.open("/show.bin", "r");
+        if (!f)
+        {
+            File wf = FatFS.open("/show.bin", "w");
+            if (wf)
+                wf.close();
+        }
+        else
+        {
+            f.close();
+        }
+
+        File idx = FatFS.open("/INDEX.HTM", "r");
+        if (!idx)
+        {
+            File widx = FatFS.open("/INDEX.HTM", "w");
+            if (widx)
+            {
+                widx.println(F("<!doctype html>"));
+                widx.println(F("<html><head><meta charset=\"utf-8\"><title>PicoLume Receiver</title></head>"));
+                widx.println(F("<body><h1>PicoLume Receiver</h1><p>USB upload volume.</p></body></html>"));
+                widx.close();
+            }
+        }
+        else
+        {
+            idx.close();
+        }
+    }
     FatFSUSB.begin();
 
     Serial.println(F("USB Mass Storage mode active"));
     bool ledState = false;
     unsigned long lastBlink = 0;
 
-    while (true) {
-        if (millis() - lastBlink > 500) {
+    while (true)
+    {
+        if (millis() - lastBlink > 500)
+        {
             ledState = !ledState;
             strip.setPixelColor(0, ledState ? strip.Color(0, 0, 50) : 0);
             strip.show();
             lastBlink = millis();
         }
 
-        if (Serial.available()) {
+        if (Serial.available())
+        {
             char c = Serial.read();
-            if (c == 'r' || c == 'R') {
+            if (c == 'r' || c == 'R')
+            {
                 display.clearDisplay();
                 display.setTextSize(1);
                 display.setCursor(10, 0);
                 display.println(F("SYNCING..."));
                 display.display();
-                strip.setPixelColor(0, strip.Color(255, 255, 0));  // Yellow
+                strip.setPixelColor(0, strip.Color(255, 255, 0)); // Yellow
                 strip.show();
-                
+
                 // Stop USB mass storage - forces host to flush
                 FatFSUSB.end();
                 delay(500);
-                
+
                 // Unmount filesystem cleanly
                 FatFS.end();
                 delay(100);
-                
+
                 display.clearDisplay();
                 display.setTextSize(2);
                 display.setCursor(10, 8);
@@ -410,13 +770,15 @@ void runUSBMode() {
                 strip.setPixelColor(0, strip.Color(255, 0, 0));
                 strip.show();
                 delay(100);
-                
+
                 watchdog_reboot(0, 0, 100);
-                while(true);
+                while (true)
+                    ;
             }
         }
 
-        if (usbUnplugged) {
+        if (usbUnplugged)
+        {
             display.clearDisplay();
             display.setTextSize(2);
             display.setCursor(10, 8);
@@ -426,32 +788,42 @@ void runUSBMode() {
             strip.show();
             delay(1000);
             watchdog_reboot(0, 0, 100);
-            while (true) { delay(10); }
+            while (true)
+            {
+                delay(10);
+            }
         }
         delay(10);
     }
 }
 
 // ====================== SETUP MODE ===========================
-void handleSetupMode() {
+void handleSetupMode()
+{
     uint8_t tempPropID = propID;
     unsigned long pressStartTime = 0;
     bool isPressed = false;
     bool lastIsPressed = false;
 
     inSetupMode = true;
-    while (true) {
+    while (true)
+    {
         display.clearDisplay();
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
         display.setCursor(34, 0);
         display.print(F("Setup Mode"));
         display.setTextSize(3);
-        if (tempPropID < 10) {
+        if (tempPropID < 10)
+        {
             display.setCursor(56, 9);
-        } else if (tempPropID < 100) {
+        }
+        else if (tempPropID < 100)
+        {
             display.setCursor(47, 9);
-        } else {
+        }
+        else
+        {
             display.setCursor(38, 9);
         }
         display.print(tempPropID);
@@ -459,18 +831,22 @@ void handleSetupMode() {
 
         isPressed = (digitalRead(CONFIG_BUTTON_PIN) == LOW);
 
-        if (isPressed && !lastIsPressed) {
+        if (isPressed && !lastIsPressed)
+        {
             pressStartTime = millis();
         }
 
-        if (!isPressed && lastIsPressed) {
+        if (!isPressed && lastIsPressed)
+        {
             tempPropID++;
-            if (tempPropID > TOTAL_PROPS) {
+            if (tempPropID > TOTAL_PROPS)
+            {
                 tempPropID = 1;
             }
         }
 
-        if (isPressed && (millis() - pressStartTime > LONG_PRESS_MS)) {
+        if (isPressed && (millis() - pressStartTime > LONG_PRESS_MS))
+        {
             propID = tempPropID;
             savePropID(propID);
 
@@ -480,7 +856,8 @@ void handleSetupMode() {
             display.print(F("SAVED!"));
             display.display();
 
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 3; i++)
+            {
                 strip.fill(strip.Color(0, 255, 0));
                 strip.show();
                 delay(150);
@@ -489,7 +866,10 @@ void handleSetupMode() {
                 delay(150);
             }
             watchdog_reboot(0, 0, 100);
-            while (true) { delay(10); }
+            while (true)
+            {
+                delay(10);
+            }
         }
         lastIsPressed = isPressed;
         delay(20);
@@ -497,7 +877,8 @@ void handleSetupMode() {
 }
 
 // ====================== DISPLAY UPDATE =======================
-void updateDisplay() {
+void updateDisplay()
+{
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
@@ -512,13 +893,20 @@ void updateDisplay() {
     display.print(lastRSSI);
 
     display.setCursor(0, 10);
-    if (inSetupMode) {
+    if (inSetupMode)
+    {
         display.print(F("MODE: SETUP"));
-    } else if (inTestMode) {
+    }
+    else if (inTestMode)
+    {
         display.print(F("MODE: TEST"));
-    } else if (millis() - lastPacketTime > PACKET_TIMEOUT_MS) {
+    }
+    else if (millis() - lastPacketTime > PACKET_TIMEOUT_MS)
+    {
         display.print(F("MODE: NO SIGNAL"));
-    } else {
+    }
+    else
+    {
         display.print(F("MODE: READY"));
     }
 
@@ -526,12 +914,14 @@ void updateDisplay() {
     uint32_t s = currentShowTime / 1000;
     uint32_t ms = (currentShowTime % 1000) / 10;
     display.print(F("TC: "));
-    if (s < 10) {
+    if (s < 10)
+    {
         display.print(F("0"));
     }
     display.print(s);
     display.print(F(":"));
-    if (ms < 10) {
+    if (ms < 10)
+    {
         display.print(F("0"));
     }
     display.print(ms);
@@ -541,20 +931,23 @@ void updateDisplay() {
 }
 
 // ====================== TEST MODE ANIMATION ==================
-void animationRainbowChase() {
-    if (millis() - lastAnimationTime < 30) return;
+void animationRainbowChase()
+{
+    if (millis() - lastAnimationTime < 30)
+        return;
     lastAnimationTime = millis();
 
     const int bandWidth = 20;
     const int numColors = 4;
-    static uint32_t palette[numColors] = {
-        strip.Color(255, 0, 0),
-        strip.Color(255, 255, 0),
-        strip.Color(0, 0, 255),
-        strip.Color(255, 255, 255)
-    };
+    // Compute palette dynamically for RGBW support
+    uint32_t palette[numColors] = {
+        makeColor(255, 0, 0),
+        makeColor(255, 255, 0),
+        makeColor(0, 0, 255),
+        makeColor(255, 255, 255)};
     animationStep++;
-    for (uint16_t i = 0; i < strip.numPixels(); i++) {
+    for (uint16_t i = 0; i < strip.numPixels(); i++)
+    {
         int colorIndex = ((i + animationStep) / bandWidth) % numColors;
         strip.setPixelColor(i, palette[colorIndex]);
     }
@@ -562,8 +955,10 @@ void animationRainbowChase() {
 }
 
 // ====================== SCHEDULER ============================
-void checkSchedule() {
-    if (showLength == 0) {
+void checkSchedule()
+{
+    if (showLength == 0)
+    {
         currentEffectType = CMD_OFF;
         return;
     }
@@ -572,10 +967,13 @@ void checkSchedule() {
     uint8_t bucketIndex = (propID - 1) / 32;
     uint32_t bitMask = (1UL << ((propID - 1) % 32));
 
-    for (int i = 0; i < showLength; i++) {
-        ShowEvent* e = &showSchedule[i];
-        if (currentShowTime >= e->startTime && currentShowTime < (e->startTime + e->duration)) {
-            if (e->targetMask[bucketIndex] & bitMask) {
+    for (int i = 0; i < showLength; i++)
+    {
+        ShowEvent *e = &showSchedule[i];
+        if (currentShowTime >= e->startTime && currentShowTime < (e->startTime + e->duration))
+        {
+            if (e->targetMask[bucketIndex] & bitMask)
+            {
                 currentEffectType = e->effectType;
                 currentEffectStart = e->startTime;
                 currentEffectDuration = e->duration;
@@ -587,7 +985,8 @@ void checkSchedule() {
             }
         }
     }
-    if (!eventFound) {
+    if (!eventFound)
+    {
         currentEffectType = CMD_OFF;
     }
 }
@@ -598,79 +997,101 @@ void checkSchedule() {
 // Just paste the render functions from V15.0 here.
 // I will include the key render function below to ensure complete file.
 
-void renderSolid(uint32_t color) {
+void renderSolid(uint32_t color)
+{
     strip.fill(color);
     markDirty();
 }
 
-void renderCameraFlash(uint32_t localTime, uint32_t color) {
-    if (localTime % 500 < 50) {
-        strip.fill(strip.Color(255, 255, 255));
-    } else {
+void renderCameraFlash(uint32_t localTime, uint32_t color)
+{
+    if (localTime % 500 < 50)
+    {
+        strip.fill(makeColor(255, 255, 255));
+    }
+    else
+    {
         strip.clear();
     }
     markDirty();
 }
 
-void renderStrobe(uint32_t localTime, uint32_t color) {
-    if ((localTime / 33) % 2 == 0) {
+void renderStrobe(uint32_t localTime, uint32_t color)
+{
+    if ((localTime / 33) % 2 == 0)
+    {
         strip.fill(color);
-    } else {
+    }
+    else
+    {
         strip.clear();
     }
     markDirty();
 }
 
-void renderRainbowChaseShow(uint32_t localTime) {
+void renderRainbowChaseShow(uint32_t localTime)
+{
     uint16_t hueOffset = (localTime * 65536) / 2000;
-    for (int i = 0; i < strip.numPixels(); i++) {
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         int pixelHue = hueOffset + (i * 65536L / strip.numPixels());
         strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(pixelHue)));
     }
     markDirty();
 }
 
-void renderRainbowHold() {
-    for (int i = 0; i < strip.numPixels(); i++) {
+void renderRainbowHold()
+{
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         int pixelHue = (i * 65536L / strip.numPixels());
         strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(pixelHue)));
     }
     markDirty();
 }
 
-void renderWipe(uint32_t localTime, uint32_t color) {
+void renderWipe(uint32_t localTime, uint32_t color)
+{
     float progress = (float)localTime / (float)currentEffectDuration;
-    if (progress > 1.0) progress = 1.0;
+    if (progress > 1.0)
+        progress = 1.0;
     int litPixels = (int)(progress * strip.numPixels());
-    for (int i = 0; i < strip.numPixels(); i++) {
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         strip.setPixelColor(i, (i < litPixels) ? color : 0);
     }
     markDirty();
 }
 
-void renderChase(uint32_t localTime, uint32_t color) {
+void renderChase(uint32_t localTime, uint32_t color)
+{
     float speed = 2.0;
     float pos = (float)((localTime * (int)speed) % 1000) / 1000.0f;
     int center = pos * strip.numPixels();
     int width = strip.numPixels() / 10;
     strip.clear();
-    for (int i = 0; i < strip.numPixels(); i++) {
-        if (abs(i - center) < width) {
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
+        if (abs(i - center) < width)
+        {
             strip.setPixelColor(i, color);
         }
     }
     markDirty();
 }
 
-void renderScanner(uint32_t localTime, uint32_t color) {
+void renderScanner(uint32_t localTime, uint32_t color)
+{
     float speed = 2.0;
     float t = (float)localTime / 1000.0f * speed;
     float pos = (sin(t) + 1.0f) / 2.0f;
     int center = pos * (strip.numPixels() - 1);
     strip.clear();
-    for (int i = 0; i < strip.numPixels(); i++) {
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         float dist = abs(i - center);
-        if (dist < 5) {
+        if (dist < 5)
+        {
             float dim = 1.0 - (dist / 5.0);
             strip.setPixelColor(i, dimColor(color, dim));
         }
@@ -678,14 +1099,17 @@ void renderScanner(uint32_t localTime, uint32_t color) {
     markDirty();
 }
 
-void renderMeteor(uint32_t localTime, uint32_t color) {
+void renderMeteor(uint32_t localTime, uint32_t color)
+{
     float speed = 2.0;
     float t = (float)((localTime * (int)speed) % 1000) / 1000.0f;
     int head = t * strip.numPixels();
     int tailLen = strip.numPixels() / 3;
     strip.clear();
-    for (int i = 0; i < strip.numPixels(); i++) {
-        if (i <= head && i > head - tailLen) {
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
+        if (i <= head && i > head - tailLen)
+        {
             float decay = (float)(head - i) / (float)tailLen;
             strip.setPixelColor(i, dimColor(color, 1.0 - decay));
         }
@@ -693,7 +1117,8 @@ void renderMeteor(uint32_t localTime, uint32_t color) {
     markDirty();
 }
 
-void renderBreathe(uint32_t localTime, uint32_t color) {
+void renderBreathe(uint32_t localTime, uint32_t color)
+{
     float speed = 2.0;
     float t = (float)localTime / 1000.0f * speed;
     float b = (sin(t * 3.14159) + 1.0f) / 2.0f;
@@ -701,163 +1126,213 @@ void renderBreathe(uint32_t localTime, uint32_t color) {
     markDirty();
 }
 
-void renderHeartbeat(uint32_t localTime, uint32_t color) {
+void renderHeartbeat(uint32_t localTime, uint32_t color)
+{
     float t = (float)(localTime % 1000) / 1000.0f;
     float brightness = 0;
-    if (t < 0.15) {
+    if (t < 0.15)
+    {
         brightness = sin(t * 3.14159 / 0.15);
-    } else if (t > 0.25 && t < 0.45) {
+    }
+    else if (t > 0.25 && t < 0.45)
+    {
         brightness = sin((t - 0.25) * 3.14159 / 0.2) * 0.6;
     }
     strip.fill(dimColor(color, brightness));
     markDirty();
 }
 
-void renderSparkle(uint32_t localTime, uint32_t color) {
+void renderSparkle(uint32_t localTime, uint32_t color)
+{
     strip.fill(dimColor(color, 0.2));
     srand(localTime / 50);
-    for (int i = 0; i < strip.numPixels(); i++) {
-        if ((rand() % 100) > 90) {
-            strip.setPixelColor(i, 255, 255, 255);
+    uint32_t sparkleWhite = makeColor(255, 255, 255);
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
+        if ((rand() % 100) > 90)
+        {
+            strip.setPixelColor(i, sparkleWhite);
         }
     }
     markDirty();
 }
 
-void renderFire(uint32_t localTime) {
+void renderFire(uint32_t localTime)
+{
     srand(localTime / 80);
-    for (int i = 0; i < strip.numPixels(); i++) {
+    // Pre-compute fire colors for RGBW compatibility
+    uint32_t fireRed = makeColor(255, 0, 0);
+    uint32_t fireYellow = makeColor(255, 255, 0);
+    uint32_t fireOrange = makeColor(255, 80, 0);
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         int r = rand() % 100;
-        uint32_t c = strip.Color(255, 0, 0);
-        if (r > 80) {
-            c = strip.Color(255, 255, 0);
-        } else if (r > 50) {
-            c = strip.Color(255, 80, 0);
+        uint32_t c = fireRed;
+        if (r > 80)
+        {
+            c = fireYellow;
+        }
+        else if (r > 50)
+        {
+            c = fireOrange;
         }
         strip.setPixelColor(i, c);
     }
     markDirty();
 }
 
-void renderEnergy(uint32_t localTime, uint32_t color, uint32_t color2) {
+void renderEnergy(uint32_t localTime, uint32_t color, uint32_t color2)
+{
     float t = (float)localTime / 500.0f;
-    uint8_t r1 = (color >> 16) & 0xFF, g1 = (color >> 8) & 0xFF, b1 = color & 0xFF;
-    uint8_t r2 = (color2 >> 16) & 0xFF, g2 = (color2 >> 8) & 0xFF, b2 = color2 & 0xFF;
-    for (int i = 0; i < strip.numPixels(); i++) {
+    // Note: color/color2 are already RGBW-converted, extract original RGB from event data
+    uint8_t r1 = (currentEffectColor >> 16) & 0xFF, g1 = (currentEffectColor >> 8) & 0xFF, b1 = currentEffectColor & 0xFF;
+    uint8_t r2 = (currentEffectColor2 >> 16) & 0xFF, g2 = (currentEffectColor2 >> 8) & 0xFF, b2 = currentEffectColor2 & 0xFF;
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         float w1 = sin(i * 0.2 + t);
         float w2 = sin(i * 0.3 - t * 1.5);
         float val = (w1 + w2 + 2.0f) / 4.0f;
         uint8_t r = r1 + (r2 - r1) * val;
         uint8_t g = g1 + (g2 - g1) * val;
         uint8_t b = b1 + (b2 - b1) * val;
-        strip.setPixelColor(i, strip.Color(r, g, b));
+        strip.setPixelColor(i, makeColor(r, g, b));
     }
     markDirty();
 }
 
-void renderGlitch(uint32_t localTime, uint32_t color, uint32_t color2) {
+void renderGlitch(uint32_t localTime, uint32_t color, uint32_t color2)
+{
     srand(localTime / 50);
-    if (rand() % 10 > 7) {
+    if (rand() % 10 > 7)
+    {
         strip.fill(color2);
-    } else {
+    }
+    else
+    {
         strip.fill(color);
     }
     markDirty();
 }
 
-void renderAlternate(uint32_t color, uint32_t color2) {
-    for (int i = 0; i < strip.numPixels(); i++) {
+void renderAlternate(uint32_t color, uint32_t color2)
+{
+    for (int i = 0; i < strip.numPixels(); i++)
+    {
         strip.setPixelColor(i, (i % 2 == 0) ? color : color2);
     }
     markDirty();
 }
 
-void renderFrame() {
+void renderFrame()
+{
     uint32_t localTime = currentShowTime - currentEffectStart;
-    uint8_t r = (uint8_t)((currentEffectColor >> 16) & 0xFF);
-    uint8_t g = (uint8_t)((currentEffectColor >> 8) & 0xFF);
-    uint8_t b = (uint8_t)(currentEffectColor & 0xFF);
-    uint32_t c = strip.Color(r, g, b);
-    uint8_t r2 = (uint8_t)((currentEffectColor2 >> 16) & 0xFF);
-    uint8_t g2 = (uint8_t)((currentEffectColor2 >> 8) & 0xFF);
-    uint8_t b2 = (uint8_t)(currentEffectColor2 & 0xFF);
-    uint32_t c2 = strip.Color(r2, g2, b2);
-    switch (currentEffectType) {
-        case CMD_OFF:
-            if (!stripIsOff) {
-                strip.clear();
-                markAllOff();
-            }
-            break;
-        case CMD_SOLID_COLOR:
-            renderSolid(c);
-            break;
-        case CMD_CAMERA_FLASH:
-            renderCameraFlash(localTime, c);
-            break;
-        case CMD_STROBE:
-            renderStrobe(localTime, c);
-            break;
-        case CMD_RAINBOW_CHASE:
-            renderRainbowChaseShow(localTime);
-            break;
-        case CMD_RAINBOW_HOLD:
-            renderRainbowHold();
-            break;
-        case CMD_WIPE:
-            renderWipe(localTime, c);
-            break;
-        case CMD_CHASE:
-            renderChase(localTime, c);
-            break;
-        case CMD_SCANNER:
-            renderScanner(localTime, c);
-            break;
-        case CMD_METEOR:
-            renderMeteor(localTime, c);
-            break;
-        case CMD_BREATHE:
-            renderBreathe(localTime, c);
-            break;
-        case CMD_HEARTBEAT:
-            renderHeartbeat(localTime, c);
-            break;
-        case CMD_SPARKLE:
-            renderSparkle(localTime, c);
-            break;
-        case CMD_FIRE:
-            renderFire(localTime);
-            break;
-        case CMD_ENERGY:
-            renderEnergy(localTime, c, c2);
-            break;
-        case CMD_GLITCH:
-            renderGlitch(localTime, c, c2);
-            break;
-        case CMD_ALTERNATE:
-            renderAlternate(c, c2);
-            break;
-        default:
-            if (!stripIsOff) {
-                strip.clear();
-                markAllOff();
-            }
-            break;
+    // Convert packed RGB to strip color (handles RGBW conversion if needed)
+    uint32_t c = makeColorFromPacked(currentEffectColor);
+    uint32_t c2 = makeColorFromPacked(currentEffectColor2);
+    switch (currentEffectType)
+    {
+    case CMD_OFF:
+        if (!stripIsOff)
+        {
+            strip.clear();
+            markAllOff();
+        }
+        break;
+    case CMD_SOLID_COLOR:
+        renderSolid(c);
+        break;
+    case CMD_CAMERA_FLASH:
+        renderCameraFlash(localTime, c);
+        break;
+    case CMD_STROBE:
+        renderStrobe(localTime, c);
+        break;
+    case CMD_RAINBOW_CHASE:
+        renderRainbowChaseShow(localTime);
+        break;
+    case CMD_RAINBOW_HOLD:
+        renderRainbowHold();
+        break;
+    case CMD_WIPE:
+        renderWipe(localTime, c);
+        break;
+    case CMD_CHASE:
+        renderChase(localTime, c);
+        break;
+    case CMD_SCANNER:
+        renderScanner(localTime, c);
+        break;
+    case CMD_METEOR:
+        renderMeteor(localTime, c);
+        break;
+    case CMD_BREATHE:
+        renderBreathe(localTime, c);
+        break;
+    case CMD_HEARTBEAT:
+        renderHeartbeat(localTime, c);
+        break;
+    case CMD_SPARKLE:
+        renderSparkle(localTime, c);
+        break;
+    case CMD_FIRE:
+        renderFire(localTime);
+        break;
+    case CMD_ENERGY:
+        renderEnergy(localTime, c, c2);
+        break;
+    case CMD_GLITCH:
+        renderGlitch(localTime, c, c2);
+        break;
+    case CMD_ALTERNATE:
+        renderAlternate(c, c2);
+        break;
+    default:
+        if (!stripIsOff)
+        {
+            strip.clear();
+            markAllOff();
+        }
+        break;
     }
 }
 
 // ====================== SETUP ================================
-void setup() {
+void setup()
+{
+    // Check button FIRST before any delays - critical for USB mode entry
+    pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
+    delay(50); // Brief debounce
+    bool enterUSBMode = (digitalRead(CONFIG_BUTTON_PIN) == LOW);
+
     Serial.begin(115200);
-    delay(100);
-    Serial.println(F("PicoLume Receiver v0.2.0 (V3 format)"));
+
+#if DEBUG_MODE
+    // Only wait for serial if NOT entering USB mode (don't delay USB mode entry)
+    if (!enterUSBMode)
+    {
+        // Wait for USB serial to enumerate (critical for Pico USB CDC)
+        // Timeout after 3 seconds to avoid blocking if no serial monitor attached
+        unsigned long serialWaitStart = millis();
+        while (!Serial && (millis() - serialWaitStart < 3000))
+        {
+            delay(10);
+        }
+        delay(100); // Extra settling time
+    }
+
+    Serial.println();
+    Serial.println(F("========================================"));
+    Serial.println(F("  PicoLume Receiver v0.2.0 (V3 format)"));
+    Serial.println(F("========================================"));
+#endif
 
     EEPROM.begin(256);
 
     Wire1.setSDA(OLED_SDA_PIN);
     Wire1.setSCL(OLED_SCL_PIN);
     Wire1.begin();
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+    {
         Serial.println(F("SSD1306 fail"));
     }
     display.setRotation(2);
@@ -874,12 +1349,12 @@ void setup() {
     markAllOff();
     showIfDirty();
 
-    pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
-    delay(100);
-
     propID = loadPropID();
+    Serial.print(F("Prop ID from EEPROM: "));
+    Serial.println(propID);
 
-    if (digitalRead(CONFIG_BUTTON_PIN) == LOW) {
+    if (enterUSBMode)
+    {
         runUSBMode();
     }
 
@@ -888,7 +1363,8 @@ void setup() {
     display.print(F("Loading show..."));
     display.display();
 
-    if (!FatFS.begin()) {
+    if (!FatFS.begin())
+    {
         FatFS.format();
         FatFS.begin();
     }
@@ -896,7 +1372,8 @@ void setup() {
     bool showLoaded = loadShowFromFlash();
     FatFS.end();
 
-    if (!showLoaded) {
+    if (!showLoaded)
+    {
         display.clearDisplay();
         display.setCursor(0, 0);
         display.println(F("NO SHOW FILE!"));
@@ -909,18 +1386,39 @@ void setup() {
         delay(2000);
     }
 
-    // CRITICAL: Update strip length based on what we loaded!
+    // CRITICAL: Configure strip based on PropConfig (type, color order, length, brightness)
+    isRGBW = (myConfig.ledType == LED_SK6812_RGBW);
+    uint16_t neoPixelType = getNeoPixelType(myConfig.ledType, myConfig.colorOrder);
+
+    Serial.println();
+    Serial.println(F("=== STRIP CONFIGURATION ==="));
+    Serial.print(F("LED Type: "));
+    Serial.print(myConfig.ledType);
+    Serial.print(F(" ("));
+    Serial.print(ledTypeName(myConfig.ledType));
+    Serial.println(F(")"));
+    Serial.print(F("Color Order: "));
+    Serial.print(myConfig.colorOrder);
+    Serial.print(F(" ("));
+    Serial.print(colorOrderName(myConfig.colorOrder));
+    Serial.println(F(")"));
+    Serial.print(F("NeoPixel Type Flags: 0x"));
+    Serial.println(neoPixelType, HEX);
+    Serial.print(F("LED Count: "));
+    Serial.println(numLeds);
+    Serial.print(F("Brightness Cap: "));
+    Serial.println(myConfig.brightnessCap);
+    Serial.print(F("RGBW Mode: "));
+    Serial.println(isRGBW ? F("YES") : F("NO"));
+    Serial.println(F("==========================="));
+    Serial.println();
+
+    strip.updateType(neoPixelType);
     strip.updateLength(numLeds);
-    // Apply per-prop brightness cap (from myConfig, populated by V1/V2/V3 loader)
     strip.setBrightness(myConfig.brightnessCap);
     strip.clear();
     markAllOff();
     showIfDirty();
-
-    Serial.print(F("Strip configured: "));
-    Serial.print(numLeds);
-    Serial.print(F(" LEDs @ brightness "));
-    Serial.println(myConfig.brightnessCap);
 
     attachInterrupt(digitalPinToInterrupt(CONFIG_BUTTON_PIN), button_isr, FALLING);
 
@@ -931,13 +1429,18 @@ void setup() {
     digitalWrite(RF69_RST_PIN, LOW);
     delay(10);
 
-    if (!driver.init()) {
+    if (!driver.init())
+    {
         Serial.println(F("Radio init failed!"));
         radioInitialized = false;
-    } else if (!driver.setFrequency(RF69_FREQ)) {
+    }
+    else if (!driver.setFrequency(RF69_FREQ))
+    {
         Serial.println(F("Set frequency failed!"));
         radioInitialized = false;
-    } else {
+    }
+    else
+    {
 #if RF_BITRATE == 2
         driver.setModemConfig(RH_RF69::FSK_Rb2Fd5);
 #elif RF_BITRATE == 57
@@ -949,39 +1452,59 @@ void setup() {
 #else
         driver.setModemConfig(RH_RF69::GFSK_Rb19_2Fd38_4);
 #endif
-        driver.setEncryptionKey((uint8_t*)ENCRYPT_KEY);
+        driver.setEncryptionKey((uint8_t *)ENCRYPT_KEY);
         driver.setTxPower(20, true);
         radioInitialized = true;
     }
 
     lastLocalMillis = millis();
     updateDisplay();
+
+#if DEBUG_MODE
+    Serial.println(F("========================================"));
+    Serial.println(F("  SETUP COMPLETE - READY"));
+    Serial.println(F("========================================"));
+    Serial.print(F("Prop ID: "));
+    Serial.println(propID);
+    Serial.print(F("Show Events: "));
+    Serial.println(showLength);
+    Serial.print(F("Radio: "));
+    Serial.println(radioInitialized ? F("OK") : F("FAILED"));
+    Serial.println(F("========================================"));
+    Serial.println();
+#endif
 }
 
 // ====================== MAIN LOOP ============================
-void loop() {
+void loop()
+{
     unsigned long now = millis();
     unsigned long delta = now - lastLocalMillis;
     lastLocalMillis = now;
 
     bool buttonIsDown = (digitalRead(CONFIG_BUTTON_PIN) == LOW);
-    if (buttonIsDown && !buttonWasDown) {
+    if (buttonIsDown && !buttonWasDown)
+    {
         buttonDownTime = now;
         longPressHandled = false;
     }
 
-    if (buttonIsDown && !longPressHandled && (now - buttonDownTime > LONG_PRESS_MS)) {
+    if (buttonIsDown && !longPressHandled && (now - buttonDownTime > LONG_PRESS_MS))
+    {
         longPressHandled = true;
         detachInterrupt(digitalPinToInterrupt(CONFIG_BUTTON_PIN));
         handleSetupMode();
     }
     buttonWasDown = buttonIsDown;
 
-    if (radioInitialized) {
-        if (driver.available()) {
+    if (radioInitialized)
+    {
+        if (driver.available())
+        {
             uint8_t buf[sizeof(RadioPacket)];
             uint8_t len = sizeof(buf);
-            if (driver.recv(buf, &len)) {
+            if (driver.recv(buf, &len))
+            {
                 lastPacketTime = now;
                 lastRSSI = driver.lastRssi();
                 RadioPacket packet;
@@ -991,9 +1514,11 @@ void loop() {
             }
         }
 
-        if (buttonPressFlag && !buttonIsDown) {
+        if (buttonPressFlag && !buttonIsDown)
+        {
             inTestMode = !inTestMode;
-            if (!inTestMode) {
+            if (!inTestMode)
+            {
                 strip.clear();
                 markAllOff();
                 showIfDirty();
@@ -1002,22 +1527,52 @@ void loop() {
             buttonPressFlag = false;
         }
 
-        if (inTestMode) {
+        if (inTestMode)
+        {
             animationRainbowChase();
-        } else {
-            if (isShowPlaying) {
-                currentShowTime += delta;
+        }
+        else if (isShowPlaying)
+        {
+            // Only run show when playing
+            // Note: currentShowTime is also set from packet.masterTime in the recv block above
+            currentShowTime += delta;
+
+            // Check if we're past the end of all events for this prop
+            if (showEndTime > 0 && currentShowTime > showEndTime)
+            {
+                // Show complete - turn off LEDs
+                if (!stripIsOff)
+                {
+                    DEBUG_PRINTLN(F("Show ended - turning off LEDs"));
+                    strip.clear();
+                    markAllOff();
+                }
             }
-            checkSchedule();
-            renderFrame();
+            else
+            {
+                checkSchedule();
+                renderFrame();
+            }
+        }
+        else
+        {
+            // Standby: keep LEDs off until show starts
+            if (!stripIsOff)
+            {
+                strip.clear();
+                markAllOff();
+            }
         }
         showIfDirty();
 
-        if (now - lastDisplayUpdateTime > 250) {
+        if (now - lastDisplayUpdateTime > 250)
+        {
             updateDisplay();
             lastDisplayUpdateTime = now;
         }
-    } else {
+    }
+    else
+    {
         display.clearDisplay();
         display.setTextSize(2);
         display.setTextColor(SSD1306_WHITE);
