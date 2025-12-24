@@ -199,7 +199,9 @@ struct __attribute__((packed)) ShowEvent
     uint32_t startTime;
     uint32_t duration;
     uint8_t effectType;
-    uint8_t _pad[3];
+    uint8_t speed; // 0-255 mapped to 0.1-5.0
+    uint8_t width; // 0-255 mapped to 0.0-1.0
+    uint8_t reserved;
     uint32_t color;
     uint32_t color2;
     uint32_t targetMask[MASK_ARRAY_SIZE];
@@ -357,6 +359,9 @@ uint32_t currentEffectStart = 0;
 uint32_t currentEffectDuration = 0;
 uint32_t currentEffectColor = 0;
 uint32_t currentEffectColor2 = 0;
+uint8_t currentEffectSpeed = 0; // Raw byte 0-255
+uint8_t currentEffectWidth = 0; // Raw byte 0-255
+uint8_t lastRenderedEffectType = 0xFF; // Used to detect OFF transitions reliably
 
 // Frame management
 bool frameDirty = false;
@@ -964,6 +969,7 @@ void checkSchedule()
     }
 
     bool eventFound = false;
+    int16_t selectedIndex = -1;
     uint8_t bucketIndex = (propID - 1) / 32;
     uint32_t bitMask = (1UL << ((propID - 1) % 32));
 
@@ -979,6 +985,9 @@ void checkSchedule()
                 currentEffectDuration = e->duration;
                 currentEffectColor = e->color;
                 currentEffectColor2 = e->color2;
+                currentEffectSpeed = e->speed;
+                currentEffectWidth = e->width;
+                selectedIndex = (int16_t)i;
                 eventFound = true;
                 lastActiveAnimationTime = millis();
                 break;
@@ -988,7 +997,43 @@ void checkSchedule()
     if (!eventFound)
     {
         currentEffectType = CMD_OFF;
+        currentEffectStart = currentShowTime;
+        currentEffectDuration = 0;
     }
+
+#if DEBUG_MODE
+    // Log only when the selected event changes (helps debug "gaps not turning off")
+    static int16_t lastScheduledEventIndex = -2; // -2=uninitialized, -1=none/off, >=0=showSchedule index
+    if (selectedIndex != lastScheduledEventIndex)
+    {
+        DEBUG_PRINT(F("[Schedule] t="));
+        DEBUG_PRINT(currentShowTime);
+        DEBUG_PRINT(F("ms prop="));
+        DEBUG_PRINT(propID);
+        DEBUG_PRINT(F(" -> "));
+
+        if (selectedIndex < 0)
+        {
+            DEBUG_PRINTLN(F("OFF (no active event)"));
+        }
+        else
+        {
+            const ShowEvent *e = &showSchedule[selectedIndex];
+            DEBUG_PRINT(F("event#"));
+            DEBUG_PRINT(selectedIndex);
+            DEBUG_PRINT(F(" start="));
+            DEBUG_PRINT(e->startTime);
+            DEBUG_PRINT(F(" dur="));
+            DEBUG_PRINT(e->duration);
+            DEBUG_PRINT(F(" end="));
+            DEBUG_PRINT(e->startTime + e->duration);
+            DEBUG_PRINT(F(" effect="));
+            DEBUG_PRINTLN(e->effectType);
+        }
+
+        lastScheduledEventIndex = selectedIndex;
+    }
+#endif
 }
 
 // ====================== EFFECT RENDERERS =====================
@@ -1031,7 +1076,11 @@ void renderStrobe(uint32_t localTime, uint32_t color)
 
 void renderRainbowChaseShow(uint32_t localTime)
 {
-    uint16_t hueOffset = (localTime * 65536) / 2000;
+    float speed = (currentEffectSpeed == 0) ? 1.0f : (float)currentEffectSpeed / 50.0f;
+    uint32_t period = (uint32_t)(2000.0f / speed);
+    if (period == 0) period = 1;
+
+    uint16_t hueOffset = (localTime * 65536) / period;
     for (int i = 0; i < strip.numPixels(); i++)
     {
         int pixelHue = hueOffset + (i * 65536L / strip.numPixels());
@@ -1065,13 +1114,23 @@ void renderWipe(uint32_t localTime, uint32_t color)
 
 void renderChase(uint32_t localTime, uint32_t color)
 {
-    float speed = 2.0;
-    float pos = (float)((localTime * (int)speed) % 1000) / 1000.0f;
-    int center = pos * strip.numPixels();
-    int width = strip.numPixels() / 10;
+    float speed = (currentEffectSpeed == 0) ? 2.0f : (float)currentEffectSpeed / 50.0f;
+    float widthRatio = (currentEffectWidth == 0) ? 0.1f : (float)currentEffectWidth / 255.0f;
+    
+    float pos = (float)((localTime * (int)(speed * 100)) % 100000) / 100000.0f; // Scale up for smoother int calc
+    // Or simpler: float pos = fmod(localTime * speed / 1000.0f, 1.0f);
+    // Let's stick to original logic but dynamic:
+    float effectiveTime = (float)localTime / 1000.0f * speed;
+    float posInCycle = effectiveTime - floor(effectiveTime);
+    
+    int center = posInCycle * strip.numPixels();
+    int width = max(1, (int)(strip.numPixels() * widthRatio));
+    
     strip.clear();
     for (int i = 0; i < strip.numPixels(); i++)
     {
+        // Wrap-around logic for smoother scrolling? Original code didn't wrap.
+        // Original: if (abs(i - center) < width)
         if (abs(i - center) < width)
         {
             strip.setPixelColor(i, color);
@@ -1082,17 +1141,23 @@ void renderChase(uint32_t localTime, uint32_t color)
 
 void renderScanner(uint32_t localTime, uint32_t color)
 {
-    float speed = 2.0;
+    float speed = (currentEffectSpeed == 0) ? 2.0f : (float)currentEffectSpeed / 50.0f;
     float t = (float)localTime / 1000.0f * speed;
     float pos = (sin(t) + 1.0f) / 2.0f;
     int center = pos * (strip.numPixels() - 1);
+    
+    float widthRatio = (currentEffectWidth == 0) ? 0.1f : (float)currentEffectWidth / 255.0f;
+    // Scanner "width" acts as the decay distance (original was 5 pixels/units hardcoded)
+    // Map 0.0-1.0 width to 1-20 pixels?
+    float distLimit = max(2.0f, widthRatio * 50.0f);
+
     strip.clear();
     for (int i = 0; i < strip.numPixels(); i++)
     {
         float dist = abs(i - center);
-        if (dist < 5)
+        if (dist < distLimit)
         {
-            float dim = 1.0 - (dist / 5.0);
+            float dim = 1.0 - (dist / distLimit);
             strip.setPixelColor(i, dimColor(color, dim));
         }
     }
@@ -1101,10 +1166,15 @@ void renderScanner(uint32_t localTime, uint32_t color)
 
 void renderMeteor(uint32_t localTime, uint32_t color)
 {
-    float speed = 2.0;
-    float t = (float)((localTime * (int)speed) % 1000) / 1000.0f;
+    float speed = (currentEffectSpeed == 0) ? 2.0f : (float)currentEffectSpeed / 50.0f;
+    float effectiveTime = (float)localTime / 1000.0f * speed;
+    float t = effectiveTime - floor(effectiveTime);
+    
     int head = t * strip.numPixels();
-    int tailLen = strip.numPixels() / 3;
+    
+    float widthRatio = (currentEffectWidth == 0) ? 0.33f : (float)currentEffectWidth / 255.0f;
+    int tailLen = max(1, (int)(strip.numPixels() * widthRatio));
+
     strip.clear();
     for (int i = 0; i < strip.numPixels(); i++)
     {
@@ -1119,7 +1189,7 @@ void renderMeteor(uint32_t localTime, uint32_t color)
 
 void renderBreathe(uint32_t localTime, uint32_t color)
 {
-    float speed = 2.0;
+    float speed = (currentEffectSpeed == 0) ? 2.0f : (float)currentEffectSpeed / 50.0f;
     float t = (float)localTime / 1000.0f * speed;
     float b = (sin(t * 3.14159) + 1.0f) / 2.0f;
     strip.fill(dimColor(color, b));
@@ -1225,19 +1295,39 @@ void renderAlternate(uint32_t color, uint32_t color2)
 
 void renderFrame()
 {
-    uint32_t localTime = currentShowTime - currentEffectStart;
-    // Convert packed RGB to strip color (handles RGBW conversion if needed)
-    uint32_t c = makeColorFromPacked(currentEffectColor);
-    uint32_t c2 = makeColorFromPacked(currentEffectColor2);
-    switch (currentEffectType)
+    // Safety: force OFF if we've run past the selected effect's end time.
+    // This makes gaps reliably clear even if scheduling hiccups.
+    if (currentEffectType != CMD_OFF && currentEffectDuration > 0)
     {
-    case CMD_OFF:
-        if (!stripIsOff)
+        const uint32_t endTime = currentEffectStart + currentEffectDuration;
+        if (currentShowTime >= endTime)
+        {
+            currentEffectType = CMD_OFF;
+            currentEffectStart = currentShowTime;
+            currentEffectDuration = 0;
+        }
+    }
+
+    // Robust OFF handling: clear once when entering OFF, rather than relying
+    // solely on stripIsOff being perfectly in sync with the physical strip.
+    if (currentEffectType == CMD_OFF)
+    {
+        if (lastRenderedEffectType != CMD_OFF)
         {
             strip.clear();
             markAllOff();
         }
-        break;
+        lastRenderedEffectType = CMD_OFF;
+        return;
+    }
+
+    uint32_t localTime = currentShowTime - currentEffectStart;
+    // Convert packed RGB to strip color (handles RGBW conversion if needed)
+    uint32_t c = makeColorFromPacked(currentEffectColor);
+    uint32_t c2 = makeColorFromPacked(currentEffectColor2);
+
+    switch (currentEffectType)
+    {
     case CMD_SOLID_COLOR:
         renderSolid(c);
         break;
@@ -1294,6 +1384,8 @@ void renderFrame()
         }
         break;
     }
+
+    lastRenderedEffectType = currentEffectType;
 }
 
 // ====================== SETUP ================================
