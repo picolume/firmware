@@ -56,7 +56,7 @@ struct PropConfig;
 #define RF_BITRATE 19
 #define ENCRYPT_KEY "GoMarchingBand!!"
 
-#define TOTAL_PROPS 224
+#define TOTAL_PROPS 20
 #define MASK_ARRAY_SIZE 7
 #define MAX_EVENTS 512
 
@@ -352,6 +352,7 @@ int16_t lastRSSI = 0;
 // Animation state
 uint16_t animationStep = 0;
 unsigned long lastLocalMillis = 0;
+bool packetReceivedThisFrame = false; // Prevents double-advancing time
 
 // Current effect state
 uint8_t currentEffectType = CMD_OFF;
@@ -990,6 +991,25 @@ void checkSchedule()
                 selectedIndex = (int16_t)i;
                 eventFound = true;
                 lastActiveAnimationTime = millis();
+
+                // Debug: specifically log when OFF event is selected
+                if (e->effectType == CMD_OFF)
+                {
+                    static uint32_t lastOffEventLog = 0;
+                    if (currentShowTime - lastOffEventLog > 200)
+                    {
+                        DEBUG_PRINT(F("[Schedule] t="));
+                        DEBUG_PRINT(currentShowTime);
+                        DEBUG_PRINT(F("ms -> FOUND OFF EVENT #"));
+                        DEBUG_PRINT(i);
+                        DEBUG_PRINT(F(" ("));
+                        DEBUG_PRINT(e->startTime);
+                        DEBUG_PRINT(F("-"));
+                        DEBUG_PRINT(e->startTime + e->duration);
+                        DEBUG_PRINTLN(F("ms)"));
+                        lastOffEventLog = currentShowTime;
+                    }
+                }
                 break;
             }
         }
@@ -999,6 +1019,16 @@ void checkSchedule()
         currentEffectType = CMD_OFF;
         currentEffectStart = currentShowTime;
         currentEffectDuration = 0;
+
+        // Debug: log when we fall through to OFF (no matching event)
+        static uint32_t lastNoEventLog = 0;
+        if (currentShowTime - lastNoEventLog > 500) // Log every 500ms max
+        {
+            DEBUG_PRINT(F("[Schedule] t="));
+            DEBUG_PRINT(currentShowTime);
+            DEBUG_PRINTLN(F("ms -> NO MATCHING EVENT, setting OFF"));
+            lastNoEventLog = currentShowTime;
+        }
     }
 
 #if DEBUG_MODE
@@ -1295,6 +1325,23 @@ void renderAlternate(uint32_t color, uint32_t color2)
 
 void renderFrame()
 {
+    // Debug: log current effect type periodically
+    static uint32_t lastRenderLog = 0;
+    static uint8_t lastLoggedEffect = 0xFF;
+    if (currentEffectType != lastLoggedEffect || (millis() - lastRenderLog > 1000))
+    {
+        DEBUG_PRINT(F("[renderFrame] t="));
+        DEBUG_PRINT(currentShowTime);
+        DEBUG_PRINT(F("ms effect="));
+        DEBUG_PRINT(currentEffectType);
+        DEBUG_PRINT(F(" lastRendered="));
+        DEBUG_PRINT(lastRenderedEffectType);
+        DEBUG_PRINT(F(" stripIsOff="));
+        DEBUG_PRINTLN(stripIsOff ? F("true") : F("false"));
+        lastRenderLog = millis();
+        lastLoggedEffect = currentEffectType;
+    }
+
     // Safety: force OFF if we've run past the selected effect's end time.
     // This makes gaps reliably clear even if scheduling hiccups.
     if (currentEffectType != CMD_OFF && currentEffectDuration > 0)
@@ -1308,15 +1355,25 @@ void renderFrame()
         }
     }
 
-    // Robust OFF handling: clear once when entering OFF, rather than relying
-    // solely on stripIsOff being perfectly in sync with the physical strip.
+    // Robust OFF handling: ALWAYS clear and show when in OFF state.
+    // This ensures LEDs turn off reliably even if previous clear failed.
     if (currentEffectType == CMD_OFF)
     {
+        // Explicitly set all pixels to black (more reliable than clear())
+        for (uint16_t i = 0; i < strip.numPixels(); i++)
+        {
+            strip.setPixelColor(i, 0);
+        }
+        strip.show();
+
         if (lastRenderedEffectType != CMD_OFF)
         {
-            strip.clear();
-            markAllOff();
+            DEBUG_PRINT(F("[renderFrame] OFF transition from effect "));
+            DEBUG_PRINTLN(lastRenderedEffectType);
         }
+
+        stripIsOff = true;
+        frameDirty = false;
         lastRenderedEffectType = CMD_OFF;
         return;
     }
@@ -1589,6 +1646,9 @@ void loop()
     }
     buttonWasDown = buttonIsDown;
 
+    // Reset per-frame state
+    packetReceivedThisFrame = false;
+
     if (radioInitialized)
     {
         if (driver.available())
@@ -1603,6 +1663,7 @@ void loop()
                 memcpy(&packet, buf, sizeof(packet));
                 currentShowTime = packet.masterTime;
                 isShowPlaying = (packet.state == 1);
+                packetReceivedThisFrame = true; // Don't also increment by delta
             }
         }
 
@@ -1626,19 +1687,29 @@ void loop()
         else if (isShowPlaying)
         {
             // Only run show when playing
-            // Note: currentShowTime is also set from packet.masterTime in the recv block above
-            currentShowTime += delta;
+            // Only increment time locally if we didn't receive a packet this frame
+            // (packet.masterTime is authoritative; adding delta would double-advance time)
+            if (!packetReceivedThisFrame)
+            {
+                currentShowTime += delta;
+            }
 
             // Check if we're past the end of all events for this prop
             if (showEndTime > 0 && currentShowTime > showEndTime)
             {
-                // Show complete - turn off LEDs
+                // Show complete - turn off LEDs (always, for reliability)
                 if (!stripIsOff)
                 {
                     DEBUG_PRINTLN(F("Show ended - turning off LEDs"));
-                    strip.clear();
-                    markAllOff();
                 }
+                for (uint16_t i = 0; i < strip.numPixels(); i++)
+                {
+                    strip.setPixelColor(i, 0);
+                }
+                strip.show();
+                stripIsOff = true;
+                frameDirty = false;
+                lastRenderedEffectType = CMD_OFF;
             }
             else
             {
@@ -1648,12 +1719,15 @@ void loop()
         }
         else
         {
-            // Standby: keep LEDs off until show starts
-            if (!stripIsOff)
+            // Standby: keep LEDs off until show starts (always clear for reliability)
+            for (uint16_t i = 0; i < strip.numPixels(); i++)
             {
-                strip.clear();
-                markAllOff();
+                strip.setPixelColor(i, 0);
             }
+            strip.show();
+            stripIsOff = true;
+            frameDirty = false;
+            lastRenderedEffectType = CMD_OFF;
         }
         showIfDirty();
 
