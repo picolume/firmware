@@ -88,9 +88,7 @@ When enabled:
 | 0      | 4    | Magic (`0x5049434F` = "PICO") |
 | 4      | 2    | Version (3)                   |
 | 6      | 2    | Event count                   |
-| 8      | 2    | LED count (legacy fallback)   |
-| 10     | 1    | Brightness (legacy fallback)  |
-| 11     | 5    | Reserved                      |
+| 8      | 8    | Reserved                      |
 
 ### PropConfig LUT (1792 bytes)
 

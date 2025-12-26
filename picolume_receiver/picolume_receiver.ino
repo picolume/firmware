@@ -212,10 +212,7 @@ struct __attribute__((packed)) ShowHeader
     uint32_t magic;
     uint16_t version;
     uint16_t eventCount;
-    uint16_t ledCount;  // Global default (Legacy/Fallback)
-    uint8_t brightness; // Global brightness (fallback for V1/V2)
-    uint8_t _reserved1;
-    uint8_t reserved[4];
+    uint8_t reserved[8]; // Reserved bytes (formerly legacy ledCount/brightness)
 };
 
 // PropConfig - V3 per-prop configuration (8 bytes each, 224 entries = 1792 bytes)
@@ -280,11 +277,7 @@ static void printShowConfig(const ShowHeader &header, uint8_t id, const PropConf
     Serial.print(F(" version="));
     Serial.print(header.version);
     Serial.print(F(" events="));
-    Serial.print(header.eventCount);
-    Serial.print(F(" legacyLedCount="));
-    Serial.print(header.ledCount);
-    Serial.print(F(" legacyBrightness="));
-    Serial.println(header.brightness);
+    Serial.println(header.eventCount);
 
     Serial.print(F("Prop ID: "));
     Serial.println(id);
@@ -329,7 +322,6 @@ PropConfig myConfig = {
 int showLength = 0;
 uint32_t showEndTime = 0; // Calculated end time of last event
 uint16_t numLeds = DEFAULT_NUM_LEDS;
-uint8_t maxBrightness = DEFAULT_BRIGHTNESS;
 
 // ====================== RUNTIME STATE ========================
 uint8_t propID = 1;
@@ -504,8 +496,6 @@ bool loadShowFromFlash()
     }
 
     // V3: PropConfig LUT (8 bytes per prop = 1792 bytes total)
-    maxBrightness = header.brightness; // Global fallback
-
     // Seek to our prop's PropConfig entry (propID is 1-based)
     size_t propConfigOffset = sizeof(ShowHeader) + (propID - 1) * sizeof(PropConfig);
     Serial.print(F("Seeking to PropConfig at offset: "));
