@@ -49,8 +49,10 @@ Master clock transmitter for synchronized LED light shows.
 2. Flash the receiver firmware to each prop Pico
 3. Set unique prop IDs on each receiver (1-224)
 4. Ensure all devices use matching `RF_BITRATE` and `ENCRYPT_KEY` settings
-5. Upload a `show.bin` file to each receiver via USB mass storage mode
+5. Upload a `show.bin` file to each receiver via USB mass storage mode (or use PicoLume Studio's one-click upload)
 6. Power on all devices and use the remote to control playback
+
+**Tip:** When using PicoLume Studio on Windows, the app automatically ejects the USB drive after upload for maximum reliability.
 
 ## RF Configuration
 

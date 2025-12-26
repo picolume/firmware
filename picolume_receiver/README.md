@@ -77,6 +77,8 @@ When enabled:
 3. Copy `show.bin` to the drive
 4. Eject the drive (device reboots automatically)
 
+**Note:** When using PicoLume Studio to upload, the app automatically ejects the USB drive on Windows for maximum reliability. The receiver performs proper filesystem cleanup before rebooting to ensure the new show file is read correctly.
+
 ## Show File Format (V3)
 
 ### Header (16 bytes)
@@ -146,6 +148,14 @@ When enabled:
 | 3    | WS2811       | 400 KHz | Often 12V, 3 LEDs per IC |
 | 4    | WS2813       | 800 KHz | Backup data line         |
 | 5    | WS2815       | 800 KHz | 12V version of WS2813    |
+
+## Upload Reliability
+
+The receiver includes several features to ensure reliable show file uploads:
+
+- **Filesystem cleanup on eject/reset:** When USB is ejected or a serial reset is received, the firmware properly unmounts FatFS before rebooting to ensure all writes are complete.
+- **Retry logic:** On boot, the receiver attempts to load `show.bin` up to 3 times with delays between attempts, handling cases where the filesystem hasn't fully settled.
+- **Visual feedback:** The display shows "SYNCING..." during filesystem cleanup and "EJECTED!" or "REBOOTING" before restart.
 
 ## Dependencies
 

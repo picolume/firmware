@@ -630,6 +630,38 @@ bool loadShowFromFlash()
     return true;
 }
 
+// Retry wrapper for loadShowFromFlash()
+// Helps handle cases where filesystem hasn't fully settled after USB write
+bool loadShowFromFlashWithRetry(int maxAttempts = 3)
+{
+    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+    {
+        Serial.print(F("Load attempt "));
+        Serial.print(attempt);
+        Serial.print(F("/"));
+        Serial.println(maxAttempts);
+
+        if (loadShowFromFlash())
+        {
+            if (attempt > 1)
+            {
+                Serial.print(F("Success on attempt "));
+                Serial.println(attempt);
+            }
+            return true;
+        }
+
+        if (attempt < maxAttempts)
+        {
+            Serial.println(F("Retrying after delay..."));
+            delay(200); // Give filesystem time to settle
+        }
+    }
+
+    Serial.println(F("All load attempts failed"));
+    return false;
+}
+
 // ====================== USB MASS STORAGE MODE ================
 void runUSBMode()
 {
@@ -766,7 +798,7 @@ void runUSBMode()
 
                 // Unmount filesystem cleanly
                 FatFS.end();
-                delay(100);
+                delay(200);
 
                 display.clearDisplay();
                 display.setTextSize(2);
@@ -775,7 +807,7 @@ void runUSBMode()
                 display.display();
                 strip.setPixelColor(0, strip.Color(255, 0, 0));
                 strip.show();
-                delay(100);
+                delay(500);
 
                 watchdog_reboot(0, 0, 100);
                 while (true)
@@ -786,13 +818,30 @@ void runUSBMode()
         if (usbUnplugged)
         {
             display.clearDisplay();
+            display.setTextSize(1);
+            display.setCursor(10, 0);
+            display.println(F("SYNCING..."));
+            display.display();
+            strip.setPixelColor(0, strip.Color(255, 255, 0)); // Yellow
+            strip.show();
+
+            // Stop USB mass storage - forces host to flush
+            FatFSUSB.end();
+            delay(500);
+
+            // Unmount filesystem cleanly
+            FatFS.end();
+            delay(200);
+
+            display.clearDisplay();
             display.setTextSize(2);
             display.setCursor(10, 8);
             display.println(F("EJECTED!"));
             display.display();
             strip.setPixelColor(0, strip.Color(0, 50, 0));
             strip.show();
-            delay(1000);
+            delay(500);
+
             watchdog_reboot(0, 0, 100);
             while (true)
             {
@@ -1518,7 +1567,7 @@ void setup()
         FatFS.begin();
     }
 
-    bool showLoaded = loadShowFromFlash();
+    bool showLoaded = loadShowFromFlashWithRetry(3);
     FatFS.end();
 
     if (!showLoaded)
