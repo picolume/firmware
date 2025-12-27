@@ -38,15 +38,16 @@ struct PropConfig;
 #endif
 
 // ====================== HARDWARE CONFIG ======================
-#define LED_PIN 22
-#define CONFIG_BUTTON_PIN 28
+#define PIN_LED_DATA 14
+#define CONFIG_BUTTON_PIN 3
+#define ENTER_BUTTON_PIN 15
 #define OLED_SDA_PIN 10
 #define OLED_SCL_PIN 11
 
 #define RF69_FREQ 915.0
 #define RF69_CS_PIN 17
-#define RF69_INT_PIN 21
-#define RF69_RST_PIN 20
+#define RF69_INT_PIN 20
+#define RF69_RST_PIN 21
 
 // ====================== DEFAULT CONFIG =======================
 #define DEFAULT_NUM_LEDS 164
@@ -308,7 +309,7 @@ static void printShowConfig(const ShowHeader &header, uint8_t id, const PropConf
 }
 
 // ====================== HARDWARE OBJECTS =====================
-Adafruit_NeoPixel strip(DEFAULT_NUM_LEDS, LED_PIN, NEO_RGB + NEO_KHZ800);
+Adafruit_NeoPixel strip(DEFAULT_NUM_LEDS, PIN_LED_DATA, NEO_RGB + NEO_KHZ800);
 Adafruit_SSD1306 display(128, 32, &Wire1, -1);
 RH_RF69 driver(RF69_CS_PIN, RF69_INT_PIN);
 
@@ -355,8 +356,8 @@ uint32_t currentEffectStart = 0;
 uint32_t currentEffectDuration = 0;
 uint32_t currentEffectColor = 0;
 uint32_t currentEffectColor2 = 0;
-uint8_t currentEffectSpeed = 0; // Raw byte 0-255
-uint8_t currentEffectWidth = 0; // Raw byte 0-255
+uint8_t currentEffectSpeed = 0;        // Raw byte 0-255
+uint8_t currentEffectWidth = 0;        // Raw byte 0-255
 uint8_t lastRenderedEffectType = 0xFF; // Used to detect OFF transitions reliably
 
 // Frame management
@@ -1150,7 +1151,8 @@ void renderRainbowChaseShow(uint32_t localTime)
 {
     float speed = (currentEffectSpeed == 0) ? 1.0f : (float)currentEffectSpeed / 50.0f;
     uint32_t period = (uint32_t)(2000.0f / speed);
-    if (period == 0) period = 1;
+    if (period == 0)
+        period = 1;
 
     uint16_t hueOffset = (localTime * 65536) / period;
     for (int i = 0; i < strip.numPixels(); i++)
@@ -1188,16 +1190,16 @@ void renderChase(uint32_t localTime, uint32_t color)
 {
     float speed = (currentEffectSpeed == 0) ? 2.0f : (float)currentEffectSpeed / 50.0f;
     float widthRatio = (currentEffectWidth == 0) ? 0.1f : (float)currentEffectWidth / 255.0f;
-    
+
     float pos = (float)((localTime * (int)(speed * 100)) % 100000) / 100000.0f; // Scale up for smoother int calc
     // Or simpler: float pos = fmod(localTime * speed / 1000.0f, 1.0f);
     // Let's stick to original logic but dynamic:
     float effectiveTime = (float)localTime / 1000.0f * speed;
     float posInCycle = effectiveTime - floor(effectiveTime);
-    
+
     int center = posInCycle * strip.numPixels();
     int width = max(1, (int)(strip.numPixels() * widthRatio));
-    
+
     strip.clear();
     for (int i = 0; i < strip.numPixels(); i++)
     {
@@ -1217,7 +1219,7 @@ void renderScanner(uint32_t localTime, uint32_t color)
     float t = (float)localTime / 1000.0f * speed;
     float pos = (sin(t) + 1.0f) / 2.0f;
     int center = pos * (strip.numPixels() - 1);
-    
+
     float widthRatio = (currentEffectWidth == 0) ? 0.1f : (float)currentEffectWidth / 255.0f;
     // Scanner "width" acts as the decay distance (original was 5 pixels/units hardcoded)
     // Map 0.0-1.0 width to 1-20 pixels?
@@ -1241,9 +1243,9 @@ void renderMeteor(uint32_t localTime, uint32_t color)
     float speed = (currentEffectSpeed == 0) ? 2.0f : (float)currentEffectSpeed / 50.0f;
     float effectiveTime = (float)localTime / 1000.0f * speed;
     float t = effectiveTime - floor(effectiveTime);
-    
+
     int head = t * strip.numPixels();
-    
+
     float widthRatio = (currentEffectWidth == 0) ? 0.33f : (float)currentEffectWidth / 255.0f;
     int tailLen = max(1, (int)(strip.numPixels() * widthRatio));
 
