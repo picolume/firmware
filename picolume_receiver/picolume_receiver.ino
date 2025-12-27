@@ -58,6 +58,9 @@ struct PropConfig;
 
 #define TOTAL_PROPS 20
 #define MASK_ARRAY_SIZE 7
+// Show file format supports 224 props (7 * 32-bit buckets).
+// Even if your deployment uses fewer props, the LUT in show.bin is fixed-size.
+#define SHOW_TOTAL_PROPS (MASK_ARRAY_SIZE * 32)
 #define MAX_EVENTS 512
 
 // ====================== TIMING CONSTANTS =====================
@@ -543,7 +546,7 @@ bool loadShowFromFlash()
     printShowConfig(header, propID, myConfig);
 
     // Seek past entire LUT to events section
-    f.seek(sizeof(ShowHeader) + TOTAL_PROPS * sizeof(PropConfig));
+    f.seek(sizeof(ShowHeader) + SHOW_TOTAL_PROPS * sizeof(PropConfig));
 
     Serial.print(F("Config: LEDs="));
     Serial.print(numLeds);
