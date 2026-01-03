@@ -316,38 +316,50 @@ void loop()
     int cueCRead = digitalRead(CUE_C_PIN);
     int cueDRead = digitalRead(CUE_D_PIN);
 
+    // Cue A - only act if cue is defined
     if (cueARead == LOW && lastCueAState == HIGH && (now - debounceTime > 200))
     {
-        activeCue = 1;
-        isPlaying = true;
-        masterTime = (cueTimes[0] != CUE_UNUSED) ? cueTimes[0] : 0;
+        if (cueTimes[0] != CUE_UNUSED) {
+            activeCue = 1;
+            isPlaying = true;
+            masterTime = cueTimes[0];
+        }
         debounceTime = now;
     }
     lastCueAState = cueARead;
 
+    // Cue B - only act if cue is defined
     if (cueBRead == LOW && lastCueBState == HIGH && (now - debounceTime > 200))
     {
-        activeCue = 2;
-        isPlaying = true;
-        masterTime = (cueTimes[1] != CUE_UNUSED) ? cueTimes[1] : 0;
+        if (cueTimes[1] != CUE_UNUSED) {
+            activeCue = 2;
+            isPlaying = true;
+            masterTime = cueTimes[1];
+        }
         debounceTime = now;
     }
     lastCueBState = cueBRead;
 
+    // Cue C - only act if cue is defined
     if (cueCRead == LOW && lastCueCState == HIGH && (now - debounceTime > 200))
     {
-        activeCue = 3;
-        isPlaying = true;
-        masterTime = (cueTimes[2] != CUE_UNUSED) ? cueTimes[2] : 0;
+        if (cueTimes[2] != CUE_UNUSED) {
+            activeCue = 3;
+            isPlaying = true;
+            masterTime = cueTimes[2];
+        }
         debounceTime = now;
     }
     lastCueCState = cueCRead;
 
+    // Cue D - only act if cue is defined
     if (cueDRead == LOW && lastCueDState == HIGH && (now - debounceTime > 200))
     {
-        activeCue = 4;
-        isPlaying = true;
-        masterTime = (cueTimes[3] != CUE_UNUSED) ? cueTimes[3] : 0;
+        if (cueTimes[3] != CUE_UNUSED) {
+            activeCue = 4;
+            isPlaying = true;
+            masterTime = cueTimes[3];
+        }
         debounceTime = now;
     }
     lastCueDState = cueDRead;

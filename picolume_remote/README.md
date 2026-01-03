@@ -42,7 +42,7 @@ Cue times are loaded from the `show.bin` file's CUE block:
 - Export `show.bin` which includes the CUE block
 - Upload to remote via USB mode
 
-If a cue button is pressed for an undefined cue, playback starts from time 0.
+If a cue button is pressed for an undefined cue, the button press is ignored.
 
 ## Configuration
 
