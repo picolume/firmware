@@ -7,14 +7,14 @@ Master clock transmitter for synchronized LED light shows. Broadcasts timecode t
 - Raspberry Pi Pico (RP2040)
 - RFM69HCW radio module (915 MHz)
 - 16x2 I2C LCD display
-- 6 momentary push buttons (Config/Stop, Cycle/Play, Cue A-D)
+- 6 momentary push buttons (Config/Stop, Play/Pause, Cue A-D)
 
 ## Pin Configuration
 
 | Function      | Pin | Description                              |
 | ------------- | --- | ---------------------------------------- |
 | Config/Stop   | 3   | Hold on boot for USB mode; press to stop |
-| Cycle/Play    | 15  | Start playback or cycle to next cue      |
+| Play/Pause    | 15  | Toggle play/pause                        |
 | Cue A         | 6   | Jump to Cue A time                       |
 | Cue B         | 7   | Jump to Cue B time                       |
 | Cue C         | 8   | Jump to Cue C time                       |
@@ -42,7 +42,7 @@ Cue times are loaded from the `show.bin` file's CUE block:
 - Export `show.bin` which includes the CUE block
 - Upload to remote via USB mode
 
-When cycling, undefined cues are automatically skipped.
+If a cue button is pressed for an undefined cue, playback starts from time 0.
 
 ## Configuration
 
@@ -75,15 +75,21 @@ Edit these values to match your receivers:
 | Button      | Action                                          |
 | ----------- | ----------------------------------------------- |
 | Config/Stop | Stop playback and reset to time 0               |
-| Cycle/Play  | Start playing from cue, or cycle to next cue    |
-| Cue A-D     | Jump directly to that cue's configured time     |
+| Play/Pause  | Toggle between playing and paused               |
+| Cue A-D     | Jump to cue time and start playing              |
 
 ### LCD Display
 
 ```
-Line 1: CUE A PLAY  or  STOPPED
+Line 1: CUE A PLAY  |  PLAYING  |  PAUSED  |  STOPPED
 Line 2: 12.3 s
 ```
+
+States:
+- **CUE X PLAY** - Playing from a cue point (A, B, C, or D)
+- **PLAYING** - Playing from the start (not from a cue)
+- **PAUSED** - Paused mid-show (time > 0)
+- **STOPPED** - Stopped at time 0
 
 On boot:
 ```

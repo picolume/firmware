@@ -23,7 +23,7 @@
 
 // ====================== PIN DEFINITIONS ===================
 #define CONFIG_STOP_PIN 3   // Hold on boot for USB mode, press to stop
-#define CYCLE_PLAY_PIN 15   // Cycle through cues / play from start
+#define PLAY_PAUSE_PIN 15   // Play/Pause toggle
 
 #define CUE_A_PIN 6
 #define CUE_B_PIN 7
@@ -77,7 +77,7 @@ byte lastCueBState = HIGH;
 byte lastCueCState = HIGH;
 byte lastCueDState = HIGH;
 byte lastStopState = HIGH;
-byte lastCycleState = HIGH;
+byte lastPlayState = HIGH;
 unsigned long debounceTime = 0;
 uint8_t activeCue = 0;  // 0 = none, 1-4 = Cue A-D
 
@@ -194,7 +194,7 @@ void setup()
     lcd.print("Master Clock");
 
     pinMode(CONFIG_STOP_PIN, INPUT_PULLUP);
-    pinMode(CYCLE_PLAY_PIN, INPUT_PULLUP);
+    pinMode(PLAY_PAUSE_PIN, INPUT_PULLUP);
     pinMode(CUE_A_PIN, INPUT_PULLUP);
     pinMode(CUE_B_PIN, INPUT_PULLUP);
     pinMode(CUE_C_PIN, INPUT_PULLUP);
@@ -289,7 +289,7 @@ void loop()
 
     // Control Buttons
     int stopRead = digitalRead(CONFIG_STOP_PIN);
-    int cycleRead = digitalRead(CYCLE_PLAY_PIN);
+    int playRead = digitalRead(PLAY_PAUSE_PIN);
 
     // Stop button - stops playback and resets to 0
     if (stopRead == LOW && lastStopState == HIGH && (now - debounceTime > 200))
@@ -301,44 +301,14 @@ void loop()
     }
     lastStopState = stopRead;
 
-    // Cycle/Play button - cycles through defined cues or plays from start
-    if (cycleRead == LOW && lastCycleState == HIGH && (now - debounceTime > 200))
+    // Play/Pause button - toggle play/pause state
+    if (playRead == LOW && lastPlayState == HIGH && (now - debounceTime > 200))
     {
-        if (!isPlaying) {
-            // If stopped, find first defined cue and start playing
-            uint8_t startCue = (activeCue == 0) ? 1 : activeCue;
-            // Look for a defined cue starting from current position
-            for (int i = 0; i < 4; i++) {
-                uint8_t checkCue = ((startCue - 1 + i) % 4) + 1;
-                if (cueTimes[checkCue - 1] != CUE_UNUSED) {
-                    activeCue = checkCue;
-                    masterTime = cueTimes[activeCue - 1];
-                    isPlaying = true;
-                    break;
-                }
-            }
-            // If no defined cues, start from 0
-            if (!isPlaying) {
-                activeCue = 1;
-                masterTime = 0;
-                isPlaying = true;
-            }
-        } else {
-            // If playing, cycle to next defined cue (skip undefined)
-            uint8_t startCue = activeCue;
-            for (int i = 1; i <= 4; i++) {
-                uint8_t nextCue = ((startCue - 1 + i) % 4) + 1;
-                if (cueTimes[nextCue - 1] != CUE_UNUSED) {
-                    activeCue = nextCue;
-                    masterTime = cueTimes[activeCue - 1];
-                    break;
-                }
-            }
-            // If no other defined cues found, stay on current
-        }
+        // Simple toggle: if playing, pause; if paused/stopped, play
+        isPlaying = !isPlaying;
         debounceTime = now;
     }
-    lastCycleState = cycleRead;
+    lastPlayState = playRead;
 
     // Cue Buttons
     int cueARead = digitalRead(CUE_A_PIN);
@@ -403,15 +373,23 @@ void loop()
     if (now - lastLcd > 200)
     {
         lcd.setCursor(0, 0);
-        if (isPlaying && activeCue > 0)
+        if (isPlaying)
         {
-            lcd.print("CUE ");
-            lcd.print((char)('A' + activeCue - 1));
-            lcd.print(" PLAY   ");
+            if (activeCue > 0) {
+                lcd.print("CUE ");
+                lcd.print((char)('A' + activeCue - 1));
+                lcd.print(" PLAY   ");
+            } else {
+                lcd.print("PLAYING         ");
+            }
         }
         else
         {
-            lcd.print("STOPPED         ");
+            if (masterTime == 0) {
+                lcd.print("STOPPED         ");
+            } else {
+                lcd.print("PAUSED          ");
+            }
         }
         lcd.setCursor(0, 1);
         unsigned long s = masterTime / 1000;
