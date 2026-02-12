@@ -39,7 +39,7 @@
 #define RF69_FREQ 915.0
 
 // ====================== DATA STRUCTURES ===================
-struct RadioPacket {
+struct __attribute__((packed)) RadioPacket {
     uint32_t packetCounter;
     uint32_t masterTime;
     uint8_t  state;       // 0 = STOPPED, 1 = PLAYING
@@ -88,6 +88,9 @@ uint8_t cuesConfigured = 0;  // Count of configured cues (for LCD)
 
 // USB mode flag
 volatile bool usbUnplugged = false;
+
+// Radio state
+bool radioInitialized = false;
 
 // ====================== CUE LOADING ===================
 bool loadCuesFromFlash() {
@@ -159,7 +162,17 @@ void enterUSBMode() {
 
     usbUnplugged = false;
 
-    FatFS.begin();
+    if (!FatFS.begin()) {
+        Serial.println("FatFS mount failed, formatting...");
+        lcd.setCursor(0, 1);
+        lcd.print("Formatting...   ");
+        FatFS.format();
+        if (!FatFS.begin()) {
+            lcd.clear();
+            lcd.print("FS Format Fail!");
+            while (true) { delay(1000); }
+        }
+    }
     FatFSUSB.onPlug(onUSBPlug);
     FatFSUSB.onUnplug(onUSBUnplug);
     FatFSUSB.begin();
@@ -193,6 +206,7 @@ void setup()
     lcd.backlight();
     lcd.print("Master Clock");
 
+    pinMode(LED_BUILTIN, OUTPUT);
     pinMode(CONFIG_STOP_PIN, INPUT_PULLUP);
     pinMode(PLAY_PAUSE_PIN, INPUT_PULLUP);
     pinMode(CUE_A_PIN, INPUT_PULLUP);
@@ -239,40 +253,45 @@ void setup()
     {
         Serial.println("Radio Init Failed");
         lcd.setCursor(0, 1);
-        lcd.print("Radio Fail");
+        lcd.print("Radio Fail      ");
+        radioInitialized = false;
     }
+    else
+    {
+        radioInitialized = true;
 
 // --- RF BITRATE CONFIGURATION ---
 #if RF_BITRATE == 2
-    Serial.println(F("Radio: 2kbps (FSK_Rb2Fd5)"));
-    if (!driver.setModemConfig(RH_RF69::FSK_Rb2Fd5))
-        Serial.println("Config Fail");
+        Serial.println(F("Radio: 2kbps (FSK_Rb2Fd5)"));
+        if (!driver.setModemConfig(RH_RF69::FSK_Rb2Fd5))
+            Serial.println("Config Fail");
 
 #elif RF_BITRATE == 57
-    Serial.println(F("Radio: 57.6kbps (GFSK_Rb57_6Fd120)"));
-    if (!driver.setModemConfig(RH_RF69::GFSK_Rb57_6Fd120))
-        Serial.println("Config Fail");
+        Serial.println(F("Radio: 57.6kbps (GFSK_Rb57_6Fd120)"));
+        if (!driver.setModemConfig(RH_RF69::GFSK_Rb57_6Fd120))
+            Serial.println("Config Fail");
 
 #elif RF_BITRATE == 125
-    Serial.println(F("Radio: 125kbps (GFSK_Rb125Fd125)"));
-    if (!driver.setModemConfig(RH_RF69::GFSK_Rb125Fd125))
-        Serial.println("Config Fail");
+        Serial.println(F("Radio: 125kbps (GFSK_Rb125Fd125)"));
+        if (!driver.setModemConfig(RH_RF69::GFSK_Rb125Fd125))
+            Serial.println("Config Fail");
 
 #elif RF_BITRATE == 250
-    Serial.println(F("Radio: 250kbps (GFSK_Rb250Fd250)"));
-    if (!driver.setModemConfig(RH_RF69::GFSK_Rb250Fd250))
-        Serial.println("Config Fail");
+        Serial.println(F("Radio: 250kbps (GFSK_Rb250Fd250)"));
+        if (!driver.setModemConfig(RH_RF69::GFSK_Rb250Fd250))
+            Serial.println("Config Fail");
 
 #else
-    // Default to 19.2kbps (The "Sweet Spot") if 19 is selected or ID is unknown
-    Serial.println(F("Radio: 19.2kbps (GFSK_Rb19_2Fd38_4)"));
-    if (!driver.setModemConfig(RH_RF69::GFSK_Rb19_2Fd38_4))
-        Serial.println("Config Fail");
+        // Default to 19.2kbps (The "Sweet Spot") if 19 is selected or ID is unknown
+        Serial.println(F("Radio: 19.2kbps (GFSK_Rb19_2Fd38_4)"));
+        if (!driver.setModemConfig(RH_RF69::GFSK_Rb19_2Fd38_4))
+            Serial.println("Config Fail");
 #endif
 
-    driver.setFrequency(RF69_FREQ);
-    driver.setTxPower(20, true);
-    driver.setEncryptionKey((uint8_t *)ENCRYPT_KEY);
+        driver.setFrequency(RF69_FREQ);
+        driver.setTxPower(20, true);
+        driver.setEncryptionKey((uint8_t *)ENCRYPT_KEY);
+    }
 
     lastLoopTime = millis();
 }
@@ -365,7 +384,7 @@ void loop()
     lastCueDState = cueDRead;
 
     // Broadcast Timecode (10Hz)
-    if (now - lastTxTime > 100)
+    if (radioInitialized && (now - lastTxTime > 100))
     {
         RadioPacket packet;
         packet.packetCounter = packetCount++;
