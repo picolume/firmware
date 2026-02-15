@@ -41,8 +41,8 @@ struct PropConfig;
 #define PIN_LED_DATA 14
 #define CONFIG_BUTTON_PIN 3
 #define ENTER_BUTTON_PIN 15
-#define OLED_SDA_PIN 10
-#define OLED_SCL_PIN 11
+#define OLED_SDA_PIN 4
+#define OLED_SCL_PIN 5
 
 #define RF69_FREQ 915.0
 #define RF69_CS_PIN 17
