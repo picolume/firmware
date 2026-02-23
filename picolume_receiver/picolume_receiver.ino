@@ -205,7 +205,7 @@ struct __attribute__((packed)) ShowEvent
     uint8_t effectType;
     uint8_t speed; // 0-255 mapped to 0.1-5.0
     uint8_t width; // 0-255 mapped to 0.0-1.0
-    uint8_t reserved;
+    uint8_t flags; // bit 0: 1 = reverse direction
     uint32_t color;
     uint32_t color2;
     uint32_t targetMask[MASK_ARRAY_SIZE];
@@ -358,6 +358,7 @@ uint32_t currentEffectColor = 0;
 uint32_t currentEffectColor2 = 0;
 uint8_t currentEffectSpeed = 0;        // Raw byte 0-255
 uint8_t currentEffectWidth = 0;        // Raw byte 0-255
+uint8_t currentEffectFlags = 0;        // bit 0 = reverse direction
 uint8_t lastRenderedEffectType = 0xFF; // Used to detect OFF transitions reliably
 
 // Frame management
@@ -1037,6 +1038,7 @@ void checkSchedule()
                 currentEffectColor2 = e->color2;
                 currentEffectSpeed = e->speed;
                 currentEffectWidth = e->width;
+                currentEffectFlags = e->flags;
                 selectedIndex = (int16_t)i;
                 eventFound = true;
                 lastActiveAnimationTime = millis();
@@ -1187,7 +1189,9 @@ void renderWipe(uint32_t localTime, uint32_t color)
     int litPixels = (int)(progress * strip.numPixels());
     for (int i = 0; i < strip.numPixels(); i++)
     {
-        strip.setPixelColor(i, (i < litPixels) ? color : 0);
+        bool lit = (currentEffectFlags & 0x01) ? (i >= strip.numPixels() - litPixels)
+                                               : (i < litPixels);
+        strip.setPixelColor(i, lit ? color : 0);
     }
     markDirty();
 }
@@ -1199,6 +1203,7 @@ void renderChase(uint32_t localTime, uint32_t color)
 
     float effectiveTime = (float)localTime / 1000.0f * speed;
     float posInCycle = effectiveTime - floor(effectiveTime);
+    if (currentEffectFlags & 0x01) posInCycle = 1.0f - posInCycle;
 
     int center = posInCycle * strip.numPixels();
     int width = max(1, (int)(strip.numPixels() * widthRatio));
@@ -1247,18 +1252,34 @@ void renderMeteor(uint32_t localTime, uint32_t packedRGB)
     float effectiveTime = (float)localTime / 1000.0f * speed;
     float t = effectiveTime - floor(effectiveTime);
 
-    int head = t * strip.numPixels();
-
     float widthRatio = (currentEffectWidth == 0) ? 0.33f : (float)currentEffectWidth / 255.0f;
     int tailLen = max(1, (int)(strip.numPixels() * widthRatio));
 
     strip.clear();
-    for (int i = 0; i < strip.numPixels(); i++)
+    if (currentEffectFlags & 0x01)
     {
-        if (i <= head && i > head - tailLen)
+        // Reversed: head travels right-to-left
+        int head = (strip.numPixels() - 1) - (int)(t * strip.numPixels());
+        for (int i = 0; i < strip.numPixels(); i++)
         {
-            float decay = (float)(head - i) / (float)tailLen;
-            strip.setPixelColor(i, dimColor(packedRGB, 1.0 - decay));
+            if (i >= head && i < head + tailLen)
+            {
+                float decay = (float)(i - head) / (float)tailLen;
+                strip.setPixelColor(i, dimColor(packedRGB, 1.0 - decay));
+            }
+        }
+    }
+    else
+    {
+        // Normal: head travels left-to-right
+        int head = t * strip.numPixels();
+        for (int i = 0; i < strip.numPixels(); i++)
+        {
+            if (i <= head && i > head - tailLen)
+            {
+                float decay = (float)(head - i) / (float)tailLen;
+                strip.setPixelColor(i, dimColor(packedRGB, 1.0 - decay));
+            }
         }
     }
     markDirty();
