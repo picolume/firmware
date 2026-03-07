@@ -145,11 +145,13 @@ bool loadCuesFromFlash() {
 }
 
 // ====================== USB MODE ===================
-void onUSBPlug() {
+void onUSBPlug(uint32_t data) {
+    (void)data;
     Serial.println("USB connected");
 }
 
-void onUSBUnplug() {
+void onUSBUnplug(uint32_t data) {
+    (void)data;
     Serial.println("USB disconnected");
     usbUnplugged = true;
 }

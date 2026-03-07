@@ -152,7 +152,9 @@ When enabled:
 The receiver includes several features to ensure reliable show file uploads:
 
 - **Filesystem cleanup on eject/reset:** When USB is ejected or a serial reset is received, the firmware properly unmounts FatFS before rebooting to ensure all writes are complete.
-- **Retry logic:** On boot, the receiver attempts to load `show.bin` up to 3 times with delays between attempts, handling cases where the filesystem hasn't fully settled.
+- **Non-destructive show load recovery:** On boot, the receiver remounts FatFS and retries `show.bin` loading without formatting flash. If the initial boot still misses the file, it keeps retrying in the background.
+- **Radio auto-recovery:** If the RFM69 does not initialize on the first boot attempt, the firmware automatically retries instead of staying stuck in a failed state.
+- **Safer USB entry:** The config button must stay held briefly during boot before the receiver enters USB upload mode, which reduces accidental entry from button bounce or noisy resets.
 - **Visual feedback:** The display shows "SYNCING..." during filesystem cleanup and "EJECTED!" or "REBOOTING" before restart.
 
 ## Dependencies

@@ -22,6 +22,7 @@
 // Forward declarations (required for Arduino's auto-prototype generator)
 struct ShowHeader;
 struct PropConfig;
+void updateDisplay();
 
 // ====================== DEBUG CONFIG =========================
 // Set to 1 for verbose serial output, 0 for production (faster boot)
@@ -68,6 +69,11 @@ struct PropConfig;
 #define LONG_PRESS_MS 3000
 #define PACKET_TIMEOUT_MS 3000
 #define STRIP_TIMEOUT_MS 1800000UL // 30 minutes
+#define USB_BOOT_CONFIRM_MS 250
+#define SHOW_LOAD_RETRY_DELAY_MS 250
+#define SHOW_LOAD_RECOVERY_INTERVAL_MS 5000
+#define RADIO_INIT_RETRY_DELAY_MS 250
+#define RADIO_RECOVERY_INTERVAL_MS 3000
 
 // ====================== EFFECT TYPES =========================
 enum EffectType
@@ -332,6 +338,7 @@ uint8_t propID = 1;
 uint32_t currentShowTime = 0;
 bool isShowPlaying = false;
 bool radioInitialized = false;
+bool showLoaded = false;
 bool isRGBW = false; // Set true for SK6812_RGBW strips
 
 // Mode flags
@@ -343,6 +350,8 @@ unsigned long lastPacketTime = 0;
 unsigned long lastActiveAnimationTime = 0;
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayUpdateTime = 0;
+unsigned long lastShowLoadAttemptTime = 0;
+unsigned long lastRadioInitAttemptTime = 0;
 int16_t lastRSSI = 0;
 
 // Animation state
@@ -466,6 +475,26 @@ uint32_t makeColorFromPacked(uint32_t rgb)
 // ====================== USB CALLBACKS ========================
 void plugCallback(uint32_t data) { usbWasPlugged = true; }
 void unplugCallback(uint32_t data) { usbUnplugged = true; }
+
+bool shouldEnterUSBModeOnBoot()
+{
+    if (digitalRead(CONFIG_BUTTON_PIN) != LOW)
+    {
+        return false;
+    }
+
+    unsigned long holdStart = millis();
+    while (millis() - holdStart < USB_BOOT_CONFIRM_MS)
+    {
+        if (digitalRead(CONFIG_BUTTON_PIN) != LOW)
+        {
+            return false;
+        }
+        delay(10);
+    }
+
+    return true;
+}
 
 // ====================== SHOW FILE LOADING ====================
 bool loadShowFromFlash()
@@ -642,25 +671,186 @@ bool loadShowFromFlashWithRetry(int maxAttempts = 3)
         DEBUG_PRINT(F("/"));
         DEBUG_PRINTLN(maxAttempts);
 
-        if (loadShowFromFlash())
+        bool mounted = FatFS.begin();
+        if (!mounted)
+        {
+            Serial.println(F("FatFS mount failed during show load"));
+        }
+        else
+        {
+            bool loaded = loadShowFromFlash();
+            FatFS.end();
+            if (loaded)
+            {
+                if (attempt > 1)
+                {
+                    DEBUG_PRINT(F("Success on attempt "));
+                    DEBUG_PRINTLN(attempt);
+                }
+                return true;
+            }
+        }
+
+        if (attempt < maxAttempts)
+        {
+            DEBUG_PRINTLN(F("Retrying after delay..."));
+            delay(SHOW_LOAD_RETRY_DELAY_MS * attempt);
+        }
+    }
+
+    DEBUG_PRINTLN(F("All load attempts failed"));
+    return false;
+}
+
+void applyStripConfiguration()
+{
+    isRGBW = (myConfig.ledType == LED_SK6812_RGBW);
+    uint16_t neoPixelType = getNeoPixelType(myConfig.ledType, myConfig.colorOrder);
+
+    DEBUG_PRINTLN(F(""));
+    DEBUG_PRINTLN(F("=== STRIP CONFIGURATION ==="));
+    DEBUG_PRINT(F("LED Type: "));
+    DEBUG_PRINT(myConfig.ledType);
+    DEBUG_PRINT(F(" ("));
+    DEBUG_PRINT(ledTypeName(myConfig.ledType));
+    DEBUG_PRINTLN(F(")"));
+    DEBUG_PRINT(F("Color Order: "));
+    DEBUG_PRINT(myConfig.colorOrder);
+    DEBUG_PRINT(F(" ("));
+    DEBUG_PRINT(colorOrderName(myConfig.colorOrder));
+    DEBUG_PRINTLN(F(")"));
+    DEBUG_PRINT(F("NeoPixel Type Flags: 0x"));
+    DEBUG_PRINTHEX(neoPixelType);
+    DEBUG_PRINTLN(F(""));
+    DEBUG_PRINT(F("LED Count: "));
+    DEBUG_PRINTLN(numLeds);
+    DEBUG_PRINT(F("Brightness Cap: "));
+    DEBUG_PRINTLN(myConfig.brightnessCap);
+    DEBUG_PRINT(F("RGBW Mode: "));
+    DEBUG_PRINTLN(isRGBW ? F("YES") : F("NO"));
+    DEBUG_PRINTLN(F("==========================="));
+    DEBUG_PRINTLN(F(""));
+
+    strip.updateType(neoPixelType);
+    strip.updateLength(numLeds);
+    strip.setBrightness(myConfig.brightnessCap);
+    strip.clear();
+    markAllOff();
+    showIfDirty();
+}
+
+void pulseRadioReset()
+{
+    pinMode(RF69_RST_PIN, OUTPUT);
+    digitalWrite(RF69_RST_PIN, LOW);
+    delay(10);
+    digitalWrite(RF69_RST_PIN, HIGH);
+    delay(10);
+    digitalWrite(RF69_RST_PIN, LOW);
+    delay(10);
+}
+
+bool configureRadioModem()
+{
+#if RF_BITRATE == 2
+    return driver.setModemConfig(RH_RF69::FSK_Rb2Fd5);
+#elif RF_BITRATE == 57
+    return driver.setModemConfig(RH_RF69::GFSK_Rb57_6Fd120);
+#elif RF_BITRATE == 125
+    return driver.setModemConfig(RH_RF69::GFSK_Rb125Fd125);
+#elif RF_BITRATE == 250
+    return driver.setModemConfig(RH_RF69::GFSK_Rb250Fd250);
+#else
+    return driver.setModemConfig(RH_RF69::GFSK_Rb19_2Fd38_4);
+#endif
+}
+
+bool initializeRadioOnce()
+{
+    pulseRadioReset();
+    SPI.end();
+    delay(5);
+    SPI.begin();
+
+    if (!driver.init())
+    {
+        Serial.println(F("Radio init failed!"));
+        return false;
+    }
+    if (!driver.setFrequency(RF69_FREQ))
+    {
+        Serial.println(F("Set frequency failed!"));
+        return false;
+    }
+    if (!configureRadioModem())
+    {
+        Serial.println(F("Set modem config failed!"));
+        return false;
+    }
+
+    driver.setEncryptionKey((uint8_t *)ENCRYPT_KEY);
+    driver.setTxPower(20, true);
+    return true;
+}
+
+bool initializeRadioWithRetry(int maxAttempts = 3)
+{
+    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+    {
+        DEBUG_PRINT(F("Radio init attempt "));
+        DEBUG_PRINT(attempt);
+        DEBUG_PRINT(F("/"));
+        DEBUG_PRINTLN(maxAttempts);
+
+        if (initializeRadioOnce())
         {
             if (attempt > 1)
             {
-                DEBUG_PRINT(F("Success on attempt "));
-                DEBUG_PRINTLN(attempt);
+                Serial.print(F("Radio recovered on attempt "));
+                Serial.println(attempt);
             }
             return true;
         }
 
         if (attempt < maxAttempts)
         {
-            DEBUG_PRINTLN(F("Retrying after delay..."));
-            delay(200); // Give filesystem time to settle
+            delay(RADIO_INIT_RETRY_DELAY_MS * attempt);
         }
     }
 
-    DEBUG_PRINTLN(F("All load attempts failed"));
     return false;
+}
+
+void recoverShowIfNeeded(unsigned long now)
+{
+    if (showLoaded || (now - lastShowLoadAttemptTime < SHOW_LOAD_RECOVERY_INTERVAL_MS))
+    {
+        return;
+    }
+
+    lastShowLoadAttemptTime = now;
+    if (loadShowFromFlashWithRetry(2))
+    {
+        showLoaded = true;
+        applyStripConfiguration();
+        updateDisplay();
+        Serial.println(F("Recovered show.bin after boot"));
+    }
+}
+
+void recoverRadioIfNeeded(unsigned long now)
+{
+    if (radioInitialized || (now - lastRadioInitAttemptTime < RADIO_RECOVERY_INTERVAL_MS))
+    {
+        return;
+    }
+
+    lastRadioInitAttemptTime = now;
+    if (initializeRadioWithRetry(2))
+    {
+        radioInitialized = true;
+        updateDisplay();
+    }
 }
 
 // ====================== USB MASS STORAGE MODE ================
@@ -957,6 +1147,10 @@ void updateDisplay()
     {
         display.print(F("MODE: TEST"));
     }
+    else if (!showLoaded)
+    {
+        display.print(F("MODE: NO SHOW"));
+    }
     else if (millis() - lastPacketTime > PACKET_TIMEOUT_MS)
     {
         display.print(F("MODE: NO SIGNAL"));
@@ -1118,11 +1312,6 @@ void checkSchedule()
 }
 
 // ====================== EFFECT RENDERERS =====================
-// [RENDERERS OMITTED FOR BREVITY - THEY ARE UNCHANGED FROM V15.0]
-// Note: They already use strip.numPixels(), so they are dynamic-ready!
-// Just paste the render functions from V15.0 here.
-// I will include the key render function below to ensure complete file.
-
 void renderSolid(uint32_t color)
 {
     strip.fill(color);
@@ -1515,7 +1704,7 @@ void setup()
     // Check button FIRST before any delays - critical for USB mode entry
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
     delay(50); // Brief debounce
-    bool enterUSBMode = (digitalRead(CONFIG_BUTTON_PIN) == LOW);
+    bool enterUSBMode = shouldEnterUSBModeOnBoot();
 
     Serial.begin(115200);
 
@@ -1576,14 +1765,8 @@ void setup()
     display.print(F("Loading show..."));
     display.display();
 
-    if (!FatFS.begin())
-    {
-        FatFS.format();
-        FatFS.begin();
-    }
-
-    bool showLoaded = loadShowFromFlashWithRetry(3);
-    FatFS.end();
+    showLoaded = loadShowFromFlashWithRetry(4);
+    lastShowLoadAttemptTime = millis();
 
     if (!showLoaded)
     {
@@ -1599,78 +1782,12 @@ void setup()
         delay(2000);
     }
 
-    // CRITICAL: Configure strip based on PropConfig (type, color order, length, brightness)
-    isRGBW = (myConfig.ledType == LED_SK6812_RGBW);
-    uint16_t neoPixelType = getNeoPixelType(myConfig.ledType, myConfig.colorOrder);
-
-    DEBUG_PRINTLN(F(""));
-    DEBUG_PRINTLN(F("=== STRIP CONFIGURATION ==="));
-    DEBUG_PRINT(F("LED Type: "));
-    DEBUG_PRINT(myConfig.ledType);
-    DEBUG_PRINT(F(" ("));
-    DEBUG_PRINT(ledTypeName(myConfig.ledType));
-    DEBUG_PRINTLN(F(")"));
-    DEBUG_PRINT(F("Color Order: "));
-    DEBUG_PRINT(myConfig.colorOrder);
-    DEBUG_PRINT(F(" ("));
-    DEBUG_PRINT(colorOrderName(myConfig.colorOrder));
-    DEBUG_PRINTLN(F(")"));
-    DEBUG_PRINT(F("NeoPixel Type Flags: 0x"));
-    DEBUG_PRINTHEX(neoPixelType);
-    DEBUG_PRINTLN(F(""));
-    DEBUG_PRINT(F("LED Count: "));
-    DEBUG_PRINTLN(numLeds);
-    DEBUG_PRINT(F("Brightness Cap: "));
-    DEBUG_PRINTLN(myConfig.brightnessCap);
-    DEBUG_PRINT(F("RGBW Mode: "));
-    DEBUG_PRINTLN(isRGBW ? F("YES") : F("NO"));
-    DEBUG_PRINTLN(F("==========================="));
-    DEBUG_PRINTLN(F(""));
-
-    strip.updateType(neoPixelType);
-    strip.updateLength(numLeds);
-    strip.setBrightness(myConfig.brightnessCap);
-    strip.clear();
-    markAllOff();
-    showIfDirty();
+    applyStripConfiguration();
 
     attachInterrupt(digitalPinToInterrupt(CONFIG_BUTTON_PIN), button_isr, FALLING);
 
-    pinMode(RF69_RST_PIN, OUTPUT);
-    digitalWrite(RF69_RST_PIN, LOW);
-    delay(10);
-    digitalWrite(RF69_RST_PIN, HIGH);
-    delay(10);
-    digitalWrite(RF69_RST_PIN, LOW);
-    delay(10);
-
-    if (!driver.init())
-    {
-        Serial.println(F("Radio init failed!"));
-        radioInitialized = false;
-    }
-    else if (!driver.setFrequency(RF69_FREQ))
-    {
-        Serial.println(F("Set frequency failed!"));
-        radioInitialized = false;
-    }
-    else
-    {
-#if RF_BITRATE == 2
-        driver.setModemConfig(RH_RF69::FSK_Rb2Fd5);
-#elif RF_BITRATE == 57
-        driver.setModemConfig(RH_RF69::GFSK_Rb57_6Fd120);
-#elif RF_BITRATE == 125
-        driver.setModemConfig(RH_RF69::GFSK_Rb125Fd125);
-#elif RF_BITRATE == 250
-        driver.setModemConfig(RH_RF69::GFSK_Rb250Fd250);
-#else
-        driver.setModemConfig(RH_RF69::GFSK_Rb19_2Fd38_4);
-#endif
-        driver.setEncryptionKey((uint8_t *)ENCRYPT_KEY);
-        driver.setTxPower(20, true);
-        radioInitialized = true;
-    }
+    radioInitialized = initializeRadioWithRetry(3);
+    lastRadioInitAttemptTime = millis();
 
     lastLocalMillis = millis();
     updateDisplay();
@@ -1712,79 +1829,79 @@ void loop()
     }
     buttonWasDown = buttonIsDown;
 
+    recoverShowIfNeeded(now);
+    recoverRadioIfNeeded(now);
+
+    if (!radioInitialized)
+    {
+        if (now - lastDisplayUpdateTime > 250)
+        {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.print(F("Radio offline"));
+            display.setCursor(0, 12);
+            display.print(F("Retrying boot..."));
+            display.display();
+            lastDisplayUpdateTime = now;
+        }
+        return;
+    }
+
     // Reset per-frame state
     packetReceivedThisFrame = false;
 
-    if (radioInitialized)
+    if (driver.available())
     {
-        if (driver.available())
+        uint8_t buf[sizeof(RadioPacket)];
+        uint8_t len = sizeof(buf);
+        if (driver.recv(buf, &len))
         {
-            uint8_t buf[sizeof(RadioPacket)];
-            uint8_t len = sizeof(buf);
-            if (driver.recv(buf, &len))
-            {
-                lastPacketTime = now;
-                lastRSSI = driver.lastRssi();
-                RadioPacket packet;
-                memcpy(&packet, buf, sizeof(packet));
-                currentShowTime = packet.masterTime;
-                isShowPlaying = (packet.state == 1);
-                packetReceivedThisFrame = true; // Don't also increment by delta
-            }
+            lastPacketTime = now;
+            lastRSSI = driver.lastRssi();
+            RadioPacket packet;
+            memcpy(&packet, buf, sizeof(packet));
+            currentShowTime = packet.masterTime;
+            isShowPlaying = (packet.state == 1);
+            packetReceivedThisFrame = true; // Don't also increment by delta
+        }
+    }
+
+    if (buttonPressFlag && !buttonIsDown)
+    {
+        inTestMode = !inTestMode;
+        if (!inTestMode)
+        {
+            strip.clear();
+            markAllOff();
+            showIfDirty();
+        }
+        animationStep = 0;
+        buttonPressFlag = false;
+    }
+
+    if (inTestMode)
+    {
+        animationRainbowChase();
+    }
+    else if (isShowPlaying)
+    {
+        // Only run show when playing
+        // Only increment time locally if we didn't receive a packet this frame
+        // (packet.masterTime is authoritative; adding delta would double-advance time)
+        if (!packetReceivedThisFrame)
+        {
+            currentShowTime += delta;
         }
 
-        if (buttonPressFlag && !buttonIsDown)
+        // Check if we're past the end of all events for this prop
+        if (showEndTime > 0 && currentShowTime > showEndTime)
         {
-            inTestMode = !inTestMode;
-            if (!inTestMode)
-            {
-                strip.clear();
-                markAllOff();
-                showIfDirty();
-            }
-            animationStep = 0;
-            buttonPressFlag = false;
-        }
-
-        if (inTestMode)
-        {
-            animationRainbowChase();
-        }
-        else if (isShowPlaying)
-        {
-            // Only run show when playing
-            // Only increment time locally if we didn't receive a packet this frame
-            // (packet.masterTime is authoritative; adding delta would double-advance time)
-            if (!packetReceivedThisFrame)
-            {
-                currentShowTime += delta;
-            }
-
-            // Check if we're past the end of all events for this prop
-            if (showEndTime > 0 && currentShowTime > showEndTime)
-            {
-                // Show complete - turn off LEDs once
-                if (!stripIsOff)
-                {
-                    DEBUG_PRINTLN(F("Show ended - turning off LEDs"));
-                    strip.clear();
-                    strip.show();
-                    stripIsOff = true;
-                    frameDirty = false;
-                    lastRenderedEffectType = CMD_OFF;
-                }
-            }
-            else
-            {
-                checkSchedule();
-                renderFrame();
-            }
-        }
-        else
-        {
-            // Standby: keep LEDs off until show starts
+            // Show complete - turn off LEDs once
             if (!stripIsOff)
             {
+                DEBUG_PRINTLN(F("Show ended - turning off LEDs"));
                 strip.clear();
                 strip.show();
                 stripIsOff = true;
@@ -1792,24 +1909,29 @@ void loop()
                 lastRenderedEffectType = CMD_OFF;
             }
         }
-        showIfDirty();
-
-        if (now - lastDisplayUpdateTime > 250)
+        else
         {
-            updateDisplay();
-            lastDisplayUpdateTime = now;
+            checkSchedule();
+            renderFrame();
         }
     }
     else
     {
-        display.clearDisplay();
-        display.setTextSize(2);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(5, 0);
-        display.print(F("RADIO"));
-        display.setCursor(5, 16);
-        display.print(F("FAILED"));
-        display.display();
-        delay(500);
+        // Standby: keep LEDs off until show starts
+        if (!stripIsOff)
+        {
+            strip.clear();
+            strip.show();
+            stripIsOff = true;
+            frameDirty = false;
+            lastRenderedEffectType = CMD_OFF;
+        }
+    }
+    showIfDirty();
+
+    if (now - lastDisplayUpdateTime > 250)
+    {
+        updateDisplay();
+        lastDisplayUpdateTime = now;
     }
 }
