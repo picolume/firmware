@@ -316,7 +316,7 @@ static void printShowConfig(const ShowHeader &header, uint8_t id, const PropConf
 
 // ====================== HARDWARE OBJECTS =====================
 Adafruit_NeoPixel strip(DEFAULT_NUM_LEDS, PIN_LED_DATA, NEO_RGB + NEO_KHZ800);
-Adafruit_SSD1306 display(128, 32, &Wire1, -1);
+Adafruit_SSD1306 display(128, 32, &Wire, -1);
 RH_RF69 driver(RF69_CS_PIN, RF69_INT_PIN);
 
 // ====================== SHOW DATA ============================
@@ -1730,9 +1730,9 @@ void setup()
 
     EEPROM.begin(256);
 
-    Wire1.setSDA(OLED_SDA_PIN);
-    Wire1.setSCL(OLED_SCL_PIN);
-    Wire1.begin();
+    Wire.setSDA(OLED_SDA_PIN);
+    Wire.setSCL(OLED_SCL_PIN);
+    Wire.begin();
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
     {
         Serial.println(F("SSD1306 fail"));
