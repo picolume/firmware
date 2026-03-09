@@ -23,6 +23,7 @@
 struct ShowHeader;
 struct PropConfig;
 void updateDisplay();
+void showBootStatus(const __FlashStringHelper *line1, const __FlashStringHelper *line2 = nullptr, int value = -1);
 
 // ====================== DEBUG CONFIG =========================
 // Set to 1 for verbose serial output, 0 for production (faster boot)
@@ -53,6 +54,7 @@ void updateDisplay();
 // ====================== DEFAULT CONFIG =======================
 #define DEFAULT_NUM_LEDS 164
 #define DEFAULT_BRIGHTNESS 255
+#define MAX_SAFE_LED_COUNT 4096
 
 // ====================== CUSTOMIZATION =======================
 #define RF_BITRATE 19
@@ -70,9 +72,11 @@ void updateDisplay();
 #define PACKET_TIMEOUT_MS 3000
 #define STRIP_TIMEOUT_MS 1800000UL // 30 minutes
 #define USB_BOOT_CONFIRM_MS 250
-#define SHOW_LOAD_RETRY_DELAY_MS 250
+#define SHOW_LOAD_INITIAL_SETTLE_MS 400
+#define SHOW_LOAD_RETRY_DELAY_MS 400
 #define SHOW_LOAD_RECOVERY_INTERVAL_MS 5000
-#define RADIO_INIT_RETRY_DELAY_MS 250
+#define RADIO_INIT_INITIAL_SETTLE_MS 200
+#define RADIO_INIT_RETRY_DELAY_MS 400
 #define RADIO_RECOVERY_INTERVAL_MS 3000
 
 // ====================== EFFECT TYPES =========================
@@ -319,6 +323,25 @@ Adafruit_NeoPixel strip(DEFAULT_NUM_LEDS, PIN_LED_DATA, NEO_RGB + NEO_KHZ800);
 Adafruit_SSD1306 display(128, 32, &Wire, -1);
 RH_RF69 driver(RF69_CS_PIN, RF69_INT_PIN);
 
+void showBootStatus(const __FlashStringHelper *line1, const __FlashStringHelper *line2, int value)
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.print(line1);
+    if (value >= 0)
+    {
+        display.print(value);
+    }
+    if (line2)
+    {
+        display.setCursor(0, 12);
+        display.print(line2);
+    }
+    display.display();
+}
+
 // ====================== SHOW DATA ============================
 ShowEvent showSchedule[MAX_EVENTS];
 // This prop's hardware configuration (from V3 LUT, or defaults for V1/V2)
@@ -340,6 +363,7 @@ bool isShowPlaying = false;
 bool radioInitialized = false;
 bool showLoaded = false;
 bool isRGBW = false; // Set true for SK6812_RGBW strips
+bool showFileMissing = false;
 
 // Mode flags
 bool inTestMode = false;
@@ -502,9 +526,12 @@ bool loadShowFromFlash()
     File f = FatFS.open("/show.bin", "r");
     if (!f)
     {
+        showFileMissing = true;
         Serial.println(F("No show.bin found"));
         return false;
     }
+
+    showFileMissing = false;
 
     ShowHeader header;
     if (f.read((uint8_t *)&header, sizeof(header)) != sizeof(header))
@@ -531,6 +558,20 @@ bool loadShowFromFlash()
         return false;
     }
 
+    size_t minimumShowSize = sizeof(ShowHeader) + (SHOW_TOTAL_PROPS * sizeof(PropConfig));
+    size_t expectedEventBytes = (size_t)header.eventCount * sizeof(ShowEvent);
+    size_t fileSize = f.size();
+    if (fileSize < minimumShowSize || fileSize < (minimumShowSize + expectedEventBytes))
+    {
+        Serial.print(F("show.bin truncated or incomplete (size="));
+        Serial.print(fileSize);
+        Serial.print(F(", expected at least "));
+        Serial.print(minimumShowSize + expectedEventBytes);
+        Serial.println(F(")"));
+        f.close();
+        return false;
+    }
+
     // V3: PropConfig LUT (8 bytes per prop = 1792 bytes total)
     // Seek to our prop's PropConfig entry (propID is 1-based)
     size_t propConfigOffset = sizeof(ShowHeader) + (propID - 1) * sizeof(PropConfig);
@@ -544,7 +585,12 @@ bool loadShowFromFlash()
     DEBUG_PRINT(sizeof(PropConfig));
     DEBUG_PRINTLN(F(")"));
 
-    f.seek(propConfigOffset);
+    if (!f.seek(propConfigOffset))
+    {
+        Serial.println(F("Failed to seek to PropConfig"));
+        f.close();
+        return false;
+    }
 
     // Read raw bytes first for debugging
     uint8_t rawConfig[8];
@@ -577,13 +623,39 @@ bool loadShowFromFlash()
 
     // Copy to struct
     memcpy(&myConfig, rawConfig, sizeof(PropConfig));
+    if (myConfig.ledCount == 0 || myConfig.ledCount > MAX_SAFE_LED_COUNT)
+    {
+        Serial.print(F("Invalid ledCount in PropConfig: "));
+        Serial.println(myConfig.ledCount);
+        f.close();
+        return false;
+    }
+    if (myConfig.ledType > LED_WS2815)
+    {
+        Serial.print(F("Invalid ledType in PropConfig: "));
+        Serial.println(myConfig.ledType);
+        f.close();
+        return false;
+    }
+    if (myConfig.colorOrder > COLOR_BGR)
+    {
+        Serial.print(F("Invalid colorOrder in PropConfig: "));
+        Serial.println(myConfig.colorOrder);
+        f.close();
+        return false;
+    }
     numLeds = myConfig.ledCount;
 #if DEBUG_MODE
     printShowConfig(header, propID, myConfig);
 #endif
 
     // Seek past entire LUT to events section
-    f.seek(sizeof(ShowHeader) + SHOW_TOTAL_PROPS * sizeof(PropConfig));
+    if (!f.seek(sizeof(ShowHeader) + SHOW_TOTAL_PROPS * sizeof(PropConfig)))
+    {
+        Serial.println(F("Failed to seek to events section"));
+        f.close();
+        return false;
+    }
 
     DEBUG_PRINT(F("Config: LEDs="));
     DEBUG_PRINT(numLeds);
@@ -620,8 +692,8 @@ bool loadShowFromFlash()
         {
             DEBUG_PRINT(F("Failed to read event "));
             DEBUG_PRINTLN(i);
-            showLength = i;
-            break;
+            f.close();
+            return false;
         }
         // Only track end time for events targeting THIS prop
         if (showSchedule[i].targetMask[bucketIndex] & bitMask)
@@ -664,12 +736,17 @@ bool loadShowFromFlash()
 // Helps handle cases where filesystem hasn't fully settled after USB write
 bool loadShowFromFlashWithRetry(int maxAttempts = 3)
 {
+    showBootStatus(F("Loading show..."), F("Waiting for FS"));
+    delay(SHOW_LOAD_INITIAL_SETTLE_MS);
+
     for (int attempt = 1; attempt <= maxAttempts; attempt++)
     {
         DEBUG_PRINT(F("Load attempt "));
         DEBUG_PRINT(attempt);
         DEBUG_PRINT(F("/"));
         DEBUG_PRINTLN(maxAttempts);
+
+        showBootStatus(F("Loading show..."), F("Attempt "), attempt);
 
         bool mounted = FatFS.begin();
         if (!mounted)
@@ -694,6 +771,7 @@ bool loadShowFromFlashWithRetry(int maxAttempts = 3)
         if (attempt < maxAttempts)
         {
             DEBUG_PRINTLN(F("Retrying after delay..."));
+            showBootStatus(F("Loading show..."), F("Retrying..."));
             delay(SHOW_LOAD_RETRY_DELAY_MS * attempt);
         }
     }
@@ -795,12 +873,17 @@ bool initializeRadioOnce()
 
 bool initializeRadioWithRetry(int maxAttempts = 3)
 {
+    showBootStatus(F("Starting radio..."), F("Waiting for RF"));
+    delay(RADIO_INIT_INITIAL_SETTLE_MS);
+
     for (int attempt = 1; attempt <= maxAttempts; attempt++)
     {
         DEBUG_PRINT(F("Radio init attempt "));
         DEBUG_PRINT(attempt);
         DEBUG_PRINT(F("/"));
         DEBUG_PRINTLN(maxAttempts);
+
+        showBootStatus(F("Starting radio..."), F("Attempt "), attempt);
 
         if (initializeRadioOnce())
         {
@@ -814,6 +897,7 @@ bool initializeRadioWithRetry(int maxAttempts = 3)
 
         if (attempt < maxAttempts)
         {
+            showBootStatus(F("Starting radio..."), F("Retrying..."));
             delay(RADIO_INIT_RETRY_DELAY_MS * attempt);
         }
     }
@@ -823,7 +907,7 @@ bool initializeRadioWithRetry(int maxAttempts = 3)
 
 void recoverShowIfNeeded(unsigned long now)
 {
-    if (showLoaded || (now - lastShowLoadAttemptTime < SHOW_LOAD_RECOVERY_INTERVAL_MS))
+    if (showLoaded || showFileMissing || (now - lastShowLoadAttemptTime < SHOW_LOAD_RECOVERY_INTERVAL_MS))
     {
         return;
     }
@@ -1760,11 +1844,6 @@ void setup()
         runUSBMode();
     }
 
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print(F("Loading show..."));
-    display.display();
-
     showLoaded = loadShowFromFlashWithRetry(4);
     lastShowLoadAttemptTime = millis();
 
@@ -1783,6 +1862,8 @@ void setup()
     }
 
     applyStripConfiguration();
+
+    showBootStatus(F("Starting radio..."));
 
     attachInterrupt(digitalPinToInterrupt(CONFIG_BUTTON_PIN), button_isr, FALLING);
 
